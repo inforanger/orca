@@ -35,6 +35,9 @@ export type MobileNativeChatSession = {
    *  wait for this to clear. */
   transcriptLoading: boolean
   error?: string
+  /** The read failed for good (damage, or a newer Orca's chat): the error says why, once, and
+   *  there is nothing to send into. */
+  readFailedFinally?: boolean
   /** True when an older page may exist (the last read filled the window). */
   hasMore: boolean
   /** Whether an older-history page is currently loading. */
@@ -172,7 +175,8 @@ export function useMobileNativeChatSession(args: {
         const applied = applyMobileNativeChatStreamFrame({
           merger: mergerRef.current,
           frame,
-          limit: limitRef.current,
+          // Why not the read window: a busy turn outruns it, dropping rows a scrolled-up reader is on.
+          limit: MAX_MESSAGES,
           replaceSnapshot: !snapshotSeenRef.current
         })
         if (applied.kind === 'ignored') {
@@ -235,8 +239,10 @@ export function useMobileNativeChatSession(args: {
     // apply this read's result onto the new session (mirrors desktop's guard).
     const requestSessionId = sessionId
     const requestGeneration = streamGenerationRef.current
-    const nextLimit = Math.min(limitRef.current + PAGE, MAX_MESSAGES)
-    const pageLimit = nextLimit - limitRef.current
+    // Live output grows the list past the last read, so the next page counts from what is held.
+    const held = Math.max(limitRef.current, mergerRef.current.list.length)
+    const nextLimit = Math.min(held + PAGE, MAX_MESSAGES)
+    const pageLimit = nextLimit - held
     if (pageLimit <= 0) {
       setHasMore(false)
       return

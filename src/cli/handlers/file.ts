@@ -1,3 +1,4 @@
+import { getFileOpenPosition } from './file-open-position'
 import type { GitStatusEntry, GitStatusResult } from '../../shared/git-status-types'
 import type { RuntimeFileOpenResult, RuntimeWorktreeRecord } from '../../shared/runtime-types'
 import type { RuntimeNavigationTarget } from '../../shared/runtime-navigation'
@@ -191,28 +192,38 @@ function formatOpenChangedResult(result: FileOpenChangedResult): string {
   return lines.join('\n')
 }
 
+// Why: opened:false (older hosts decline binaries) must fail a single-file command, not exit 0.
+function requireOpened(result: RuntimeFileOpenResult, target: string): void {
+  if (!result.opened) {
+    throw new RuntimeClientError(
+      'file_not_opened',
+      `Did not open ${target}: the Orca app declined this ${result.kind} file.`,
+      { nextSteps: ['Update the Orca app, which opens every file type the File Explorer does.'] }
+    )
+  }
+}
+
 function formatFileOpen(result: RuntimeFileOpenResult): string {
-  return result.opened
-    ? `Opened ${result.relativePath}.`
-    : `Did not open ${result.relativePath}: ${result.kind} file.`
+  return `Opened ${result.relativePath}.`
 }
 
 function formatFileDiff(result: RuntimeFileOpenResult): string {
-  return result.opened
-    ? `Opened diff for ${result.relativePath}.`
-    : `Did not open diff for ${result.relativePath}: ${result.kind} file.`
+  return `Opened diff for ${result.relativePath}.`
 }
 
 export const FILE_HANDLERS: Record<string, CommandHandler> = {
   'file open': async (ctx) => {
     const path = getRequiredStringFlag(ctx.flags, 'path')
+    const position = getFileOpenPosition(ctx.flags)
     const worktree = await getFileWorktreeSelector(ctx)
     const relativePath = await resolveFilePath(ctx, worktree, path)
     const result = await ctx.client.call<RuntimeFileOpenResult>('files.open', {
       worktree,
       relativePath,
-      navigation: getFileOpenNavigation(ctx.flags)
+      navigation: getFileOpenNavigation(ctx.flags),
+      ...position
     })
+    requireOpened(result.result, relativePath)
     printResult(result, ctx.json, formatFileOpen)
   },
   'file diff': async (ctx) => {
@@ -226,6 +237,7 @@ export const FILE_HANDLERS: Record<string, CommandHandler> = {
       staged,
       navigation: getFileOpenNavigation(ctx.flags)
     })
+    requireOpened(result.result, `diff for ${relativePath}`)
     printResult(result, ctx.json, formatFileDiff)
   },
   'file open-changed': async (ctx) => {

@@ -1,5 +1,5 @@
 // @ts-nocheck -- mechanically split from OrcaRuntimeService; behavior is covered by AST equivalence and characterization tests.
-import { OrcaRuntimeWithMoveHeadlessMobileSessionTab } from './orca-runtime-move-headless-mobile-session-tab'
+import { RuntimeHeadlessTabGroups } from './session-tabs/headless-tab-group-moves'
 import type {
   RuntimeMarkdownReadTabResult,
   RuntimeMarkdownSaveTabResult,
@@ -9,14 +9,15 @@ import type {
 import type { ResolvedWorktree } from './runtime-worktree-path-identity'
 import type { Repo } from '../../shared/repo-types'
 import {
+  getConnectionExecutionHostId,
   LOCAL_EXECUTION_HOST_ID,
-  toSshExecutionHostId,
   type ExecutionHostId
 } from '../../shared/execution-host'
 import { getLocalProjectWorktreeGitOptions } from '../project-runtime-git-options'
 import { resolveWorktreeHostRouting } from './worktree-launch-host-repo'
+import { isFloatingWorkspaceSelector } from '../../shared/floating-workspace-worktree'
 
-export class OrcaRuntimeWithPersistHeadlessTerminalTitle extends OrcaRuntimeWithMoveHeadlessMobileSessionTab {
+export abstract class OrcaRuntimeWithPersistHeadlessTerminalTitle extends RuntimeHeadlessTabGroups {
   // Persist a manual terminal rename so a headless rebuild keeps the title
   // instead of reverting to the generated/default one.
   protected persistHeadlessTerminalTitle(
@@ -100,7 +101,7 @@ export class OrcaRuntimeWithPersistHeadlessTerminalTitle extends OrcaRuntimeWith
     if (!snapshot) {
       return ids
     }
-    const liveBrowserTabsByPageId = this.getLiveBrowserTabsByPageId(snapshot.worktree)
+    const liveBrowserTabsByPageId = this.getListedBrowserTabsByPageId(snapshot.worktree)
     for (const tab of snapshot.tabs) {
       if (tab.type === 'browser') {
         const liveTab = tab.browserPageId
@@ -193,19 +194,27 @@ export class OrcaRuntimeWithPersistHeadlessTerminalTitle extends OrcaRuntimeWith
   // Why: same defect as `resolveRuntimeGitTarget` above, in ~30 filesystem dispatches. `getRepo(id)`
   // is host-blind and never read `worktree.hostId`, and the `connectionId` it returned spelled
   // "runtime host", "unresolved" and "genuinely local" all as `undefined` (#11163).
-  protected async resolveRuntimeFileTarget(worktreeSelector: string): Promise<{
+  async resolveRuntimeFileTarget(worktreeSelector: string): Promise<{
     worktree: ResolvedWorktree
     executionHostId: ExecutionHostId
   }> {
+    // The floating workspace has no row to resolve. Answering here rather than at each caller
+    // keeps one resolver authoritative for "where does this workspace live".
+    if (isFloatingWorkspaceSelector(worktreeSelector)) {
+      return {
+        worktree: this.floatingWorkspaceToResolvedWorktree(
+          await this.resolveFloatingWorkspacePath()
+        ),
+        executionHostId: LOCAL_EXECUTION_HOST_ID
+      }
+    }
     const folderScope = await this.resolveFolderWorkspaceLaunchScope(worktreeSelector)
     if (folderScope?.folderWorkspace) {
       // A folder workspace has no repo row to disagree with; its own inference already threw on an
       // ambiguous one, and it is never hosted by a runtime environment.
       return {
         worktree: this.folderWorkspaceToResolvedWorktree(folderScope.folderWorkspace),
-        executionHostId: folderScope.connectionId
-          ? toSshExecutionHostId(folderScope.connectionId)
-          : LOCAL_EXECUTION_HOST_ID
+        executionHostId: getConnectionExecutionHostId(folderScope.connectionId)
       }
     }
 

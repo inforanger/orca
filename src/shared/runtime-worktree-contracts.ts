@@ -9,6 +9,13 @@ import type {
 } from './worktree/lineage-types'
 import type { RuntimeListingHostScope } from './runtime-listing-host-scope'
 import type { GitWorktreeInfo, Worktree } from './worktree/types'
+import type { WorkspaceStatusWarning } from './workspace-status-warning'
+
+export type RuntimeWorktreeSetResult = {
+  worktree: RuntimeWorktreeRecord
+  /** Older hosts omit warnings; metadata writes still succeed. */
+  warnings?: WorkspaceStatusWarning[]
+}
 
 export type RuntimeWorktreeAgentRow = {
   paneKey: string
@@ -64,12 +71,18 @@ export type RuntimeWorktreePsSummary = {
   linkedLinearIssue: string | null
   linkedGitLabMR: number | null
   linkedGitLabIssue: number | null
+  linkedItems?: Worktree['linkedItems']
   comment: string
   isPinned: boolean
   isActive: boolean
   unread: boolean
   liveTerminalCount: number
   hasAttachedPty: boolean
+  /**
+   * Terminals whose host lost contact; they are not in `liveTerminalCount`, and not exited either.
+   * Always sent by current hosts, 0 included; absent only from hosts that predate the field.
+   */
+  unverifiableTerminalCount?: number
   lastOutputAt: number | null
   preview: string
   status: RuntimeWorktreeStatus
@@ -78,6 +91,10 @@ export type RuntimeWorktreePsSummary = {
   agents: RuntimeWorktreeAgentRow[]
   /** See `Worktree.removing`; sent only to clients that advertise background removal. */
   removing?: true
+  /** See `GitWorktreeInfo.removalError`. */
+  removalError?: string
+  /** This host's "Hide other-client workspaces" hides the row; sent only to its own phones. */
+  desktopOtherClient?: true
 }
 
 export type RuntimeGitLocalBranches = {

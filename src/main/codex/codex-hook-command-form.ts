@@ -19,9 +19,9 @@ const POSIX_STDIN_DRAIN = '{ command -p cat 2>/dev/null || cat; } >/dev/null 2>&
 // later forms change the script, never these bytes.
 const WINDOWS_BARE_PATH = /^[A-Za-z0-9_.:/~-]+$/
 
-function buildPosixCommand(): string {
-  const rootScript = '"${ORCA_AGENT_HOOK_ROOT-}/agent-hooks/codex-hook.sh"'
-  const sharedScript = '"${HOME-}/.orca/agent-hooks/codex-hook.sh"'
+function buildPosixCommand(scriptFileName = 'codex-hook.sh'): string {
+  const rootScript = `"\${ORCA_AGENT_HOOK_ROOT-}/agent-hooks/${scriptFileName}"`
+  const sharedScript = `"\${HOME-}/.orca/agent-hooks/${scriptFileName}"`
   // Why the root branch: dormant until Orca sets ORCA_AGENT_HOOK_ROOT, so the
   // bytes need not change when it does. The shared branch needs a hook port,
   // so a pane with hooks off and every shell outside Orca only drain stdin.
@@ -79,6 +79,16 @@ export function buildCodexHookCommand(
   env: WindowsDirectoryEnv = process.env
 ): string {
   return platform === 'win32' ? buildWindowsCommand(scriptPath, env) : buildPosixCommand()
+}
+
+export function buildCodexCheckpointGateCommand(
+  scriptPath: string,
+  platform: NodeJS.Platform = process.platform,
+  env: WindowsDirectoryEnv = process.env
+): string {
+  return platform === 'win32'
+    ? buildWindowsCommand(scriptPath, env)
+    : buildPosixCommand('codex-checkpoint-gate-hook.sh')
 }
 
 /**

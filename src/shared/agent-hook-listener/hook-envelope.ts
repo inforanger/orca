@@ -41,6 +41,7 @@ type HookMetadata = {
   worktreeId?: string
   env?: string
   version?: string
+  hookRole?: string
 }
 
 function readPackedHookMetadata(
@@ -76,13 +77,15 @@ export function mergeAgentHookRequestHeaders(body: unknown, headers: IncomingHtt
     launchToken: readHookMetadataHeader(headers, 'x-orca-launch-token', metadataEncoding),
     worktreeId: readHookMetadataHeader(headers, 'x-orca-worktree-id', metadataEncoding),
     env: readHookMetadataHeader(headers, 'x-orca-agent-hook-env', metadataEncoding),
-    version: readHookMetadataHeader(headers, 'x-orca-agent-hook-version', metadataEncoding)
+    version: readHookMetadataHeader(headers, 'x-orca-agent-hook-version', metadataEncoding),
+    hookRole: readHookHeader(headers, 'x-orca-agent-hook-role')
   }
   if (!metadata.paneKey) {
     return body
   }
   return {
     ...metadata,
+    hookRole: metadata.hookRole ?? readHookHeader(headers, 'x-orca-agent-hook-role'),
     agentProcess: readHookHeader(headers, 'x-orca-agent-process'),
     payload: body
   }

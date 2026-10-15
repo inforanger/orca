@@ -3,15 +3,20 @@ import { isAgentSessionOptionRejectedError } from './structured-agent-session-op
 import type { AgentSessionTurnContext, TurnOutcome } from './structured-agent-session-turns'
 
 export async function performSetOption(
-  ctx: AgentSessionTurnContext,
-  input: { key: string; value: string }
+  ctx: Pick<
+    AgentSessionTurnContext,
+    'sessionId' | 'adapter' | 'fence' | 'persistOptions' | 'publish'
+  >,
+  input: { key: string; value: string },
+  signal?: AbortSignal
 ): Promise<TurnOutcome<AgentSessionOptionResult>> {
   let applied: void | Readonly<Record<string, string>>
   try {
     applied = await ctx.adapter.setOption({
       sessionId: ctx.sessionId,
       ...input,
-      fence: ctx.fence
+      fence: ctx.fence,
+      ...(signal ? { signal } : {})
     })
   } catch (error) {
     if (isAgentSessionOptionRejectedError(error)) {

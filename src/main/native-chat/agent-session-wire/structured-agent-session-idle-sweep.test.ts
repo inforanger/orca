@@ -15,6 +15,7 @@ import {
   REST_TEST_SESSION as SESSION,
   REST_TEST_THREAD as THREAD,
   restTestSend,
+  sweepOnce,
   sweepTicks,
   type RestTestRig
 } from './structured-agent-session-rest-test-rig'
@@ -96,20 +97,25 @@ describe('the idle sweep', () => {
   it('never stops an agent a message is queued for, and hands the message over (P2-08)', async () => {
     await foundRestTestChat(rig)
     rig.adapter.closeSession.mockClear()
-    // The loop takes the message and waits on the child's start, outside the lock.
-    const started = Promise.withResolvers<void>()
-    const awaitStarted = vi.fn(() => started.promise)
-    Object.assign(rig.host.deps.adapter, { awaitStarted })
+    // Only the sweep this test asks for runs, at the step it is asked for.
+    rig.host.collaboratorsForTests().lifetime.idleSweep.dispose()
+    await sweepTicks(2)
     const reader = collectSubscriber()
     await rig.host.subscribe({ id: 'reader', sessionId: SESSION, emit: reader.emit })
-    const sent = await rig.host.send(CALLER, restTestSend('queued one', fence()))
-    expect(sent.ok).toBe(true)
-    await vi.waitFor(() => expect(awaitStarted).toHaveBeenCalled())
-    rig.clock.now += IDLE_MS + 1
+    // Held, the send is accepted, the agent goes idle past the window, and the sweep runs, all
+    // ahead of the handover the send asks for.
+    const held = Promise.withResolvers<void>()
+    void rig.host['tasks'].serialize(SESSION, () => held.promise)
+    const sending = rig.host.send(CALLER, restTestSend('queued one', fence()))
+    void rig.host['tasks'].serialize(SESSION, async () => {
+      rig.clock.now += IDLE_MS + 1
+    })
+    const swept = sweepOnce(rig.host)
+    held.resolve()
+    expect((await sending).ok).toBe(true)
 
-    await sweepTicks()
+    await swept
     expect(rig.adapter.closeSession).not.toHaveBeenCalled()
-    started.resolve()
     await vi.waitFor(() => expect(rig.adapter.dispatch).toHaveBeenCalledTimes(2))
     const settled = (await rig.host.journalSnapshot(SESSION)).submissions.at(-1)
     expect(settled?.dispatchState).toBe('accepted')
@@ -219,7 +225,7 @@ describe('the idle sweep', () => {
     await vi.waitFor(() => expect(rig.adapter.closeSession).toHaveBeenCalledWith(SESSION))
   })
 
-  it('never stops a worker whose orchestration dispatch is open, and stops it once it settles (P2-19 i)', async () => {
+  it('never stops the retry whose orchestration dispatch is open, and stops it once it settles (P2-19 i)', async () => {
     await rig.dispose()
     let open = true
     const hasOpenDispatch = vi.fn(() => open)
@@ -314,12 +320,12 @@ describe('the idle sweep with no child running (P2-22 ii)', () => {
       now: () => IDLE_MS + 1,
       isDisposed: () => false,
       deliveryActive: () => false,
+      store: { getRecord: () => null, replacedRuntime: () => undefined },
       childWork: () => undefined,
       hasOpenDispatch: () => false,
       providerHoldsDispatch: () => false,
       stopAgent,
       stopStartingAgent: stopAgent,
-      finishOwedWindDown: vi.fn(async () => true),
       closeConversation,
       // A failed step fails the test.
       logger: {

@@ -12,7 +12,10 @@ import type { AgentBrowserBridge } from '../browser/agent-browser-bridge'
 import type { BrowserBackend } from '../browser/browser-backend'
 import type { EmulatorBridge } from '../emulator/emulator-bridge'
 
-export class OrcaRuntimeWithNotifySshStateChanged extends OrcaRuntimeWithGetStatus {
+export abstract class OrcaRuntimeWithNotifySshStateChanged extends OrcaRuntimeWithGetStatus {
+  abstract invalidateResolvedWorktreeCache(): void
+  abstract invalidateWorktreeScanCacheForRepo(repoId: string): void
+
   private static readonly MAX_SSH_RELAY_RECOVERY_GENERATIONS = 512
   private sshRelayRecoveryGenerationSequence = 0
   // Why: SSH state changes originate in main's ssh handlers, not in runtime
@@ -157,6 +160,7 @@ export class OrcaRuntimeWithNotifySshStateChanged extends OrcaRuntimeWithGetStat
     this.emitClientEvent({ type: 'reposChanged' })
   }
 
+  /** `setup` and `defaultTabs` go to the host window only: main tried and failed to start them. */
   protected notifyActivateWorktree(
     repoId: string,
     worktreeId: string,
@@ -165,12 +169,12 @@ export class OrcaRuntimeWithNotifySshStateChanged extends OrcaRuntimeWithGetStat
     defaultTabs?: CreateWorktreeResult['defaultTabs'],
     navigationTarget?: RuntimeNavigationTarget
   ): void {
-    const navigation = navigationTarget ?? 'all'
+    const navigation = navigationTarget ?? 'host'
     if (navigationTargetsHost(navigation)) {
       this.notifyHostActivateWorktree(repoId, worktreeId, setup, startup, defaultTabs)
     }
     if (navigationTargetsClients(navigation)) {
-      this.notifyClientsActivateWorktree(repoId, worktreeId, setup, startup, defaultTabs)
+      this.notifyClientsActivateWorktree(repoId, worktreeId, startup, navigation)
     }
   }
 
@@ -187,12 +191,11 @@ export class OrcaRuntimeWithNotifySshStateChanged extends OrcaRuntimeWithGetStat
   protected notifyClientsActivateWorktree(
     repoId: string,
     worktreeId: string,
-    setup?: CreateWorktreeResult['setup'],
     startup?: WorktreeStartupLaunch,
-    defaultTabs?: CreateWorktreeResult['defaultTabs']
+    navigation: RuntimeNavigationTarget = 'clients'
   ): void {
     this.emitClientEvent(
-      toRuntimeActivateWorktreeEvent(repoId, worktreeId, setup, startup, defaultTabs)
+      toRuntimeActivateWorktreeEvent(repoId, worktreeId, undefined, startup, undefined, navigation)
     )
   }
 

@@ -3,19 +3,12 @@ import type {
   WorktreeSetupLaunch
 } from '../../../shared/worktree/launch-types'
 import { agentKindToTuiAgent } from '../../../shared/agent-kind'
-import { initialAgentTabViewModeProps } from './native-chat-initial-view-mode'
-import { getConnectionId } from '@/lib/connection-context'
-import { isNativeChatTranscriptLocalReadable } from '@/lib/native-chat-transcript-readability'
 import { seedNativeChatAppliedSessionOptions } from '@/components/native-chat/native-chat-session-option-cache'
 import type {
   InitialTerminalOptions,
   WorktreeActivationStore
 } from '@/lib/worktree-activation-store-contract'
-import {
-  draftViewModeProps,
-  resolveStartupLaunchDraftText,
-  type WorktreeStartupPayload
-} from '@/lib/worktree-startup-payload'
+import type { WorktreeStartupPayload } from '@/lib/worktree-startup-payload'
 import {
   queueSetupAndIssueCommands,
   type IssueCommandLaunch
@@ -48,37 +41,30 @@ export function applyDefaultTerminalTabs(
         : isStartupTab && startup?.telemetry
           ? (agentKindToTuiAgent(startup.telemetry.agent_kind) ?? undefined)
           : undefined
+    const templateCommand = template.command?.trim()
+    const pendingStartup = isStartupTab
+      ? startup
+      : templateCommand && defaultTabs.runCommands
+        ? { command: templateCommand }
+        : undefined
     const tab = store.createTab(worktreeId, undefined, undefined, {
       pendingActivationSpawn: true,
       recordInteraction: false,
-      ...(launchAgent
-        ? {
-            launchAgent,
-            ...initialAgentTabViewModeProps(store.settings ?? null, {
-              agent: launchAgent,
-              ...draftViewModeProps(
-                isStartupTab ? resolveStartupLaunchDraftText(startup) : undefined
-              ),
-              nativeChatTranscriptIsLocalReadable: isNativeChatTranscriptLocalReadable(
-                getConnectionId(worktreeId)
-              )
-            })
-          }
-        : {}),
-      ...(opts?.activateCreatedTabs === false ? { activate: false } : {})
+      ...(launchAgent ? { launchAgent } : {}),
+      ...(opts?.activateCreatedTabs === false ? { activate: false } : {}),
+      ...(pendingStartup ? { pendingStartup } : {})
     })
     if (index === 0) {
       firstTabId = tab.id
+    }
+    if (isStartupTab && launchAgent) {
+      seedNativeChatAppliedSessionOptions(tab.id, launchAgent, startup.sessionOptions)
     }
     if (template.title) {
       store.setTabCustomTitle(tab.id, template.title, { recordInteraction: false })
     }
     if (template.color) {
       store.setTabColor(tab.id, template.color)
-    }
-    const templateCommand = template.command?.trim()
-    if (templateCommand && defaultTabs.runCommands && !(index === 0 && startup)) {
-      store.queueTabStartupCommand(tab.id, { command: templateCommand })
     }
   }
 
@@ -87,17 +73,6 @@ export function applyDefaultTerminalTabs(
   }
   if (opts?.activateCreatedTabs !== false) {
     store.setActiveTab(firstTabId)
-  }
-  if (startup) {
-    const startupAgent =
-      startup.launchAgent ??
-      (startup.telemetry
-        ? (agentKindToTuiAgent(startup.telemetry.agent_kind) ?? undefined)
-        : undefined)
-    if (startupAgent) {
-      seedNativeChatAppliedSessionOptions(firstTabId, startupAgent, startup.sessionOptions)
-    }
-    store.queueTabStartupCommand(firstTabId, startup)
   }
   queueSetupAndIssueCommands(
     store,

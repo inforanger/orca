@@ -1,3 +1,4 @@
+import { agentSessionCurrentContextRows } from '../../../shared/agent-session-context-clear'
 // Whether a session was genuinely working when this process stopped it, and what it was doing.
 //
 // Read off the LIVE host state, never off a persisted status field. That distinction is the whole
@@ -49,7 +50,10 @@ import {
   newestStructuredAgentSessionTurn
 } from '../../../shared/structured-agent-session-live-turn'
 import type { AgentSessionJournal } from '../agent-session-journal/journal-store'
+import { isUnansweredHandedOverSubmission } from '../agent-session-journal/journal-unsent-send-hold'
 import { structuredAgentSessionShownStatus } from './structured-agent-session-shown-work'
+import { StructuredAgentSessionCurrentWork } from './structured-agent-session-current-work'
+import type { StructuredAgentSessionWorkScope } from '../../../shared/structured-agent-session-main-agent-working'
 
 /** A send Orca journaled that the provider has neither opened a turn for nor refused. Mirrors the
  *  projection's own unanswered-dispatch rule, which is what makes that window read as `working`. */
@@ -69,16 +73,22 @@ function pendingSubmissionInFlight(
   return null
 }
 
-/** The work identity to record: a running turn if one exists, else the send still awaiting one. */
+/** The work identity to record: a running turn if one exists, else the send still awaiting one.
+ *  `scope`: the host's (`structuredAgentSessionCurrentWork`), so an ended generation's turn is none. */
 export function structuredAgentSessionWorkInFlight(
   items: readonly AgentJournalRenderItem[],
-  submissions: readonly AgentJournalSubmission[]
+  submissions: readonly AgentJournalSubmission[],
+  scope?: StructuredAgentSessionWorkScope
 ): AgentSessionResumeWork | null {
-  const turnId = activeStructuredAgentSessionTurnId(items)
+  const current = agentSessionCurrentContextRows(items, submissions)
+  const turnId = activeStructuredAgentSessionTurnId(
+    current.items,
+    scope && ((item) => scope.isCurrentItem(item.itemId))
+  )
   if (turnId) {
     return { kind: 'turn', id: turnId }
   }
-  const submission = pendingSubmissionInFlight(submissions)
+  const submission = pendingSubmissionInFlight(current.submissions)
   return submission ? { kind: 'submission', id: submission.clientMessageId } : null
 }
 
@@ -88,7 +98,8 @@ export function structuredAgentSessionWorkInFlight(
  */
 function structuredAgentSessionResumeWork(
   items: readonly AgentJournalRenderItem[],
-  submissions: readonly AgentJournalSubmission[]
+  submissions: readonly AgentJournalSubmission[],
+  scope: StructuredAgentSessionWorkScope
 ): AgentSessionResumeWork | null {
   const bodies = new Map(items.map((item) => [item.itemId, item.body]))
   const bodyOf = (itemId: string) => bodies.get(itemId)
@@ -104,7 +115,7 @@ function structuredAgentSessionResumeWork(
   ) {
     return null
   }
-  const inFlight = structuredAgentSessionWorkInFlight(items, submissions)
+  const inFlight = structuredAgentSessionWorkInFlight(items, submissions, scope)
   if (inFlight) {
     return inFlight
   }
@@ -126,13 +137,17 @@ function boundedLabel(text: string | undefined): string {
 
 /** The prompts the session is blocked on, from the same items the projection called `attention`
  *  over — one read, so the recorded state and the prompts it stands for cannot disagree. */
-function pendingPrompts(items: readonly AgentJournalRenderItem[]): AgentSessionRestartPrompt[] {
+function pendingPrompts(
+  items: readonly AgentJournalRenderItem[],
+  scope: StructuredAgentSessionWorkScope
+): AgentSessionRestartPrompt[] {
   const prompts: AgentSessionRestartPrompt[] = []
   for (const item of items) {
     const body = item.body
     if (
       (body.kind !== 'approval' && body.kind !== 'question') ||
-      body.resolution.state !== 'pending'
+      body.resolution.state !== 'pending' ||
+      !scope.isCurrentItem(item.itemId)
     ) {
       continue
     }
@@ -172,34 +187,42 @@ export function structuredAgentSessionWorkingAtStop(input: {
   getRecord: (sessionId: string) => AgentSessionRecord | null
   /** The session's child records, the same read the status feed publishes. */
   childWork: (sessionId: string) => readonly AgentChildWorkView[] | undefined
+  /** False when the session's live child never answered its start; the exit reads the same fact. */
+  startAnswered?: (sessionId: string) => boolean | undefined
   trigger: AgentSessionResumeTrigger
   /** Stable teardown identity for continuation deduplication, not launch ancestry. */
   teardownId: string
   now: number
 }): AgentSessionResumeMarker | null {
   const { sessionId, session } = input
-  // A journal this host cannot read tells us nothing about what the turn was doing.
-  if (!session?.child || session.journal.isReadOnly) {
+  if (!session?.child) {
     return null
   }
   const snapshot = session.journal.snapshot()
-  // A queued message reached no agent, so it is no work to resume: quit rejects it as never sent.
-  const handedOver = snapshot.submissions.filter(
-    (submission) => !isQueuedAgentJournalSubmission(submission)
+  const current = agentSessionCurrentContextRows(snapshot.items, snapshot.submissions)
+  // A queued message reached no agent, and one handed to a start that never answered ran nowhere:
+  // neither is work to resume. The next open or the exit keeps it as unsent.
+  const unanswered = input.startAnswered?.(sessionId) === false
+  const handedOver = current.submissions.filter(
+    (submission) =>
+      !isQueuedAgentJournalSubmission(submission) &&
+      !(unanswered && isUnansweredHandedOverSubmission(submission))
   )
   const childWork = input.childWork(sessionId)
+  const record = input.getRecord(sessionId)
+  // The live generation is this host's own child, read first-hand like the rest, never the lease.
+  const { scope } = new StructuredAgentSessionCurrentWork(session.journal, session.child.fence)
   const status = structuredAgentSessionShownStatus(
-    { items: snapshot.items, submissions: handedOver },
+    { items: current.items, submissions: handedOver },
     childWork,
-    session.child.fence
+    session.child.fence,
+    scope
   )
   if (status.state === 'done') {
     return null
   }
-  const work = structuredAgentSessionResumeWork(snapshot.items, handedOver)
-  const head = agentSessionProviderHandleChainHead(
-    input.getRecord(sessionId)?.providerHandleChain ?? []
-  )
+  const work = structuredAgentSessionResumeWork(current.items, handedOver, scope)
+  const head = record ? agentSessionProviderHandleChainHead(record.providerHandleChain) : null
   if (!work || !head) {
     return null
   }
@@ -207,17 +230,20 @@ export function structuredAgentSessionWorkingAtStop(input: {
     // The lead's OWN state, not the fold: a settled lead with running children reads `done` here
     // and carries them in `tasks`, which is how the dialog tells the two apart.
     state: status.mainAgent.state,
-    prompts: pendingPrompts(snapshot.items),
+    prompts: pendingPrompts(current.items, scope),
     tasks: liveTasks(childWork)
   }
   return {
     sessionId,
     work,
-    latestUserItemId: latestStructuredAgentSessionUserItem(snapshot.items)?.itemId ?? null,
+    latestUserItemId: latestStructuredAgentSessionUserItem(current.items)?.itemId ?? null,
     recordedAt: input.now,
     trigger: input.trigger,
     teardownId: input.teardownId,
     journalCursor: snapshot.cursor,
+    ...(record?.providerContextBoundary
+      ? { contextClearOperationId: record.providerContextBoundary.operationId }
+      : {}),
     // Root, not key: the close path advances Claude's leaf moments after this runs, and a key
     // comparison would then refuse the session forever.
     providerHandleRoot: agentSessionProviderHandleRoot(head.handle),

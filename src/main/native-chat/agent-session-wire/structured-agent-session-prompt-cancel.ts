@@ -13,7 +13,9 @@ import {
   validatePendingPrompt,
   type PendingPromptValidation
 } from './structured-agent-session-prompt-state'
+import { cardCancelNotSavedRefusal, stopNotSaved } from './structured-agent-session-stop-acceptance'
 import type { AgentSessionTurnContext, TurnOutcome } from './structured-agent-session-turns'
+import { contextStructuredAgentSessionCurrentWork } from './structured-agent-session-current-work'
 
 type CancelOutcome = TurnOutcome<AgentSessionCancelResult>
 type PendingPrompt = Extract<PendingPromptValidation, { ok: true }>
@@ -41,21 +43,12 @@ export async function cancelStructuredAgentSessionPrompt(
     ok: true,
     value: { ...(input.turnId ? { turnId: input.turnId } : {}), cancelled: true }
   }
-  if (route.kind === 'dismiss') {
+  // Judged on the fold as it stands: the provider's own cancel of the card, or the end of the turn
+  // that raised it, landed when it was handed over. A request that outlived its turn, such as a
+  // background agent's, is not the running turn's: nothing stops and the request is declined.
+  // The dismissal's row carries the Cancel's receipt, unless the Stop already saved it.
+  if (route.kind === 'dismiss' || !raisedByLiveTurn(ctx, validated)) {
     const dismissed = await dismissPrompt(ctx, validated, true)
-    return dismissed.ok ? cancelled : dismissed
-  }
-  // Judged once the provider's accepted lifecycle has landed: its own cancel of the card, or the end
-  // of the turn that raised it, may still be queued. A failed drain judges what has landed.
-  await ctx.flushStreamedEvents().catch(() => undefined)
-  const current = validatePendingPrompt(ctx, input.prompt)
-  if (!current.ok) {
-    return answerCancelOfSettledPrompt(ctx, input, current)
-  }
-  if (!raisedByLiveTurn(ctx, current)) {
-    // A request that outlived its turn, such as a background agent's: the turn running now is not
-    // the one the user is cancelling, so nothing stops and the request is declined.
-    const dismissed = await dismissPrompt(ctx, current, true)
     return dismissed.ok ? cancelled : dismissed
   }
   const stopped = await routes.stop()
@@ -64,18 +57,18 @@ export async function cancelStructuredAgentSessionPrompt(
   }
   // Settled in the Stop's own step, so the card is not answerable while the child ends. That end
   // takes the provider's request with it; a Stop that ends nothing must answer the request itself.
-  const dismissed = await dismissPrompt(ctx, current, !stopped.endsSession)
+  const dismissed = await dismissPrompt(ctx, validated, !stopped.endsSession)
   return dismissed.ok ? cancelled : dismissed
 }
 
 function raisedByLiveTurn(ctx: AgentSessionTurnContext, pending: PendingPrompt): boolean {
-  const live = ctx.journal.liveTurnScope()
+  const live = contextStructuredAgentSessionCurrentWork(ctx).turnScope()
   const raised = pending.item.turnScope
   return live.kind === 'turn' && raised?.kind === 'turn' && raised.turnItemId === live.turnItemId
 }
 
-/** Records the card as cancelled by the caller, the provider's lifecycle drained first so nothing
- *  it already sent lands after; `answer` also declines the provider's request. */
+/** Records the card as cancelled by the caller, after every row the provider already sent (each
+ *  landed at its call); `answer` also declines the provider's request. */
 async function dismissPrompt(
   ctx: AgentSessionTurnContext,
   pending: PendingPrompt,
@@ -94,8 +87,8 @@ async function dismissPrompt(
     }
   }
   let committed = false
+  const receipt = ctx.operationReceipt?.isCommitted() ? undefined : ctx.operationReceipt
   const commit = async (): Promise<void> => {
-    await ctx.flushStreamedEvents()
     await ctx.journal.appendItem(
       identity,
       {
@@ -108,7 +101,8 @@ async function dismissPrompt(
         }
       },
       // A revision: the prompt keeps the turn it was raised in.
-      { fence: ctx.fence, turnScope: ctx.journal.liveTurnScope() }
+      { fence: ctx.fence, turnScope: contextStructuredAgentSessionCurrentWork(ctx).turnScope() },
+      receipt
     )
     committed = true
   }
@@ -122,7 +116,7 @@ async function dismissPrompt(
     })
   } catch (error) {
     if (!committed && !(error instanceof AgentSessionPromptUnavailableError)) {
-      throw error
+      return dismissalNotSaved(ctx, error)
     }
     if (committed) {
       // The adapter's error is Orca's; the row says only what the user needs to know.
@@ -134,14 +128,30 @@ async function dismissPrompt(
             surface: 'row'
           })
         },
-        { fence: ctx.fence, turnScope: ctx.journal.liveTurnScope() }
+        { fence: ctx.fence, turnScope: contextStructuredAgentSessionCurrentWork(ctx).turnScope() }
       )
     }
   }
   // A request the provider already let go of, by its own cancel or the child's end, is still the
   // user's to have cancelled.
   if (!committed) {
-    await commit()
+    try {
+      await commit()
+    } catch (error) {
+      return dismissalNotSaved(ctx, error)
+    }
   }
   return { ok: true, value: null }
+}
+
+/** Nothing of the Cancel saved: refused in words about the card, which stands. Once a Stop saved
+ *  the receipt, the failure is answered from it. */
+function dismissalNotSaved(ctx: AgentSessionTurnContext, error: unknown): TurnOutcome<never> {
+  if (ctx.operationReceipt?.isCommitted()) {
+    throw error
+  }
+  return stopNotSaved(ctx, error, {
+    log: "saving a card's Cancel failed; the card was not dismissed",
+    refusal: cardCancelNotSavedRefusal
+  })
 }

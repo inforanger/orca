@@ -17,13 +17,7 @@ import {
 import { logStartupMilestone } from './startup-diagnostics'
 import { notifyMainWindowBecameVisible } from '../window/main-window-visibility'
 import { setTrayAttention } from '../tray/system-tray'
-import {
-  createSystemTrayDeferred,
-  getSystemTrayOptions,
-  showMainWindowFromTray,
-  showRendererRecoveryPrompt,
-  syncMacMenuBarIcon
-} from './main-window-actions'
+import { createSystemTrayDeferred, showRendererRecoveryPrompt } from './main-window-actions'
 import { attachMainWindowCoreServices } from './main-window-core-services'
 import {
   clearMainWindowAgentStatusListeners,
@@ -186,7 +180,7 @@ export function openMainWindow(options: { revealOnDidFinishLoad?: boolean } = {}
     logStartupMilestone('did-finish-load')
     // Why cleared here: a reload drops the old ui:openMarkdownFiles listener, and the fresh
     // renderer re-attaches by pulling. Pushing into the gap between would be silently lost.
-    state.markdownFileOpenListenerReady = false
+    state.osDocumentOpenListenerReady = false
     const currentStore = state.store
     if (currentStore && resolveConsent(currentStore.getSettings()).effective === 'enabled') {
       trackAppOpenedOnce()
@@ -229,11 +223,4 @@ export function openMainWindow(options: { revealOnDidFinishLoad?: boolean } = {}
   logStartupMilestone('load-start')
   loadMainWindow(window)
   return window
-}
-
-export function configureWindowActions(): void {
-  // Kept as a named seam for startup composition; action callbacks are state-backed.
-  void getSystemTrayOptions
-  void showMainWindowFromTray
-  void syncMacMenuBarIcon
 }

@@ -24,7 +24,7 @@ vi.mock('sonner', () => ({ toast: { error: vi.fn(), message: vi.fn() } }))
 vi.mock('@/runtime/structured-agent-session-client', () => ({
   callStructuredAgentSession: mocks.call
 }))
-vi.mock('@/runtime/local-structured-session-tabs-sync', () => ({
+vi.mock('@/runtime/local-structured-session-tabs-sync/inventory-refresh', () => ({
   refreshLocalStructuredSessionTabs: mocks.refresh
 }))
 vi.mock('@/runtime/web-session-focus-intent', () => ({
@@ -94,7 +94,7 @@ async function settle(sessionId: string): Promise<void> {
 }
 
 function launch(): string {
-  const started = startStructuredAgentLaunch(WORKTREE, 'codex')
+  const started = startStructuredAgentLaunch(WORKTREE, 'codex', { requestId: 'request-1' })
   void started.launchResult.catch(() => undefined)
   return started.sessionId
 }

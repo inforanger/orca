@@ -11,21 +11,27 @@ import { readRequestBody } from '../../../shared/agent-hook-listener/request-bod
 import { resolveHookSource } from '../../../shared/agent-hook-listener/source-routing'
 import { HOOK_REQUEST_SLOWLORIS_MS } from '../../../shared/agent-hook-listener/listener-limits'
 import { isHookRequestTruncatedError } from '../../../shared/agent-hook-transport-interference'
-import { drainAgentHookSpool, type SpoolRecord } from '../../../shared/agent-hook-spool'
 import { clearAllListenerCaches } from '../../../shared/agent-hook-listener/listener-state'
 import { trackEmptyPaneKeyHook } from './server-transport-rules'
-import { AgentHookServerRuntimeEnv } from './server-runtime-env'
+import { AgentHookServerStatusHookLifecycle } from './server-status-hook-lifecycle'
+import { OPENCODE_STARTUP_PROMPT_CLAIM_PATH } from '../../../shared/opencode-startup-prompt'
+import { createAgentCheckpointHookResponse } from '../../agent-checkpoint/agent-checkpoint-hook-response'
 
-export abstract class AgentHookServerLifecycle extends AgentHookServerRuntimeEnv {
+export abstract class AgentHookServerLifecycle extends AgentHookServerStatusHookLifecycle {
   /** Start the loopback listener after hydration and spool replay have settled. */
   async start(options?: {
     env?: string
     userDataPath?: string
     endpointNamespace?: string
+    statusHooksEnabled?: boolean
   }): Promise<void> {
     if (this.server) {
+      if (options?.statusHooksEnabled !== undefined) {
+        this.setStatusHooksEnabled(options.statusHooksEnabled)
+      }
       return
     }
+    this.statusHooksEnabled = options?.statusHooksEnabled !== false
 
     if (options?.env) {
       this.env = options.env
@@ -36,31 +42,9 @@ export abstract class AgentHookServerLifecycle extends AgentHookServerRuntimeEnv
     }
     this.token = randomUUID()
     this.endpointFileWritten = false
-    this.lastWrittenJson = null
-    if (!this.ownerStateInitialized) {
-      // Why: hydrate before binding the listener so an early hook POST runs against a populated map.
-      if (this.lastStatusFilePath) {
-        this.hydrateLastStatusFromDisk()
-      }
-      this.captureHydratedAuthorityCommitments()
-      // Drain before binding the listener so replay cannot race a live hook during startup.
-      if (this.endpointDir) {
-        const replayedPaneKeys = new Set<string>()
-        drainAgentHookSpool({
-          endpointDir: this.endpointDir,
-          getPersistedLaunchTokenHash: (paneKey) =>
-            this.hydratedLaunchTokenHashByPaneKey.get(this.resolvePaneKeyAlias(paneKey)),
-          ingest: (record: SpoolRecord) => {
-            this.ingestSpoolRecord(record)
-            replayedPaneKeys.add(this.resolvePaneKeyAlias(record.paneKey))
-          }
-        })
-        // Why: the owner may have died while Orca was down; check each replayed pane once.
-        for (const paneKey of replayedPaneKeys) {
-          void this.checkAgentPresence(paneKey)
-        }
-      }
-      this.ownerStateInitialized = true
+    this.closeStatusSnapshotWriter()
+    if (this.statusHooksEnabled) {
+      this.initializeStatusHookOwner()
     }
     const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
       if (req.method !== 'POST') {
@@ -84,6 +68,22 @@ export abstract class AgentHookServerLifecycle extends AgentHookServerRuntimeEnv
       const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
       try {
         const body = await readRequestBody(req)
+        if (pathname === OPENCODE_STARTUP_PROMPT_CLAIM_PATH) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          const claim = this.onStartupPromptClaim?.(body)
+          res.end(
+            JSON.stringify({
+              allowed: claim === true,
+              ...(claim === 'pending' ? { pending: true } : {})
+            })
+          )
+          return
+        }
+        if (!this.statusHooksEnabled) {
+          res.writeHead(404)
+          res.end()
+          return
+        }
         if (pathname === CLAUDE_STATUSLINE_PATHNAME) {
           const statusLineEvent = parseClaudeStatusLineBody(body)
           if (statusLineEvent) {
@@ -103,6 +103,19 @@ export abstract class AgentHookServerLifecycle extends AgentHookServerRuntimeEnv
         const hookBody = mergeAgentHookRequestHeaders(body, req.headers)
         trackEmptyPaneKeyHook(hookBody)
         const aliasedBody = this.normalizeHookBodyPaneKeyAlias(hookBody)
+        const checkpointGateOnly = hasCheckpointGateRole(aliasedBody)
+        const checkpointResponse = await createAgentCheckpointHookResponse({
+          source,
+          body: aliasedBody
+        })
+        if (!checkpointGateOnly && (await this.ingestTmuxHook(source, aliasedBody))) {
+          writeCheckpointHookResponse(res, checkpointResponse)
+          return
+        }
+        if (checkpointGateOnly) {
+          writeCheckpointHookResponse(res, checkpointResponse)
+          return
+        }
         const normalized = this.normalizeLocalHookPayload(source, aliasedBody)
         const statusDisposition = normalized.event
           ? this.getAgentStatusDisposition(normalized.event.paneKey, {
@@ -144,9 +157,18 @@ export abstract class AgentHookServerLifecycle extends AgentHookServerRuntimeEnv
             this.scheduleTranscriptPoll(source, aliasedBody, enriched)
           }
         }
-        res.writeHead(204)
-        res.end()
+        writeCheckpointHookResponse(res, checkpointResponse)
       } catch (error) {
+        if (pathname === OPENCODE_STARTUP_PROMPT_CLAIM_PATH) {
+          if (isHookRequestTruncatedError(error) && !destroyedBySlowlorisCap) {
+            res.writeHead(503)
+            res.end()
+            return
+          }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end('{"allowed":false}')
+          return
+        }
         // Why (#11217): an authenticated POST whose body dies short of its own Content-Length was cut
         // by something on the loopback path, not by a bad payload. Fail open as before, but count it —
         // this is the one failure mode that silently stops status for every runtime at once.
@@ -187,7 +209,9 @@ export abstract class AgentHookServerLifecycle extends AgentHookServerRuntimeEnv
       this.rollbackTransportStart()
       throw error
     }
-    this.startOpenCodeBinderLoop()
+    if (this.statusHooksEnabled) {
+      this.startOpenCodeBinderLoop()
+    }
   }
 
   private rollbackTransportStart(): void {
@@ -198,14 +222,22 @@ export abstract class AgentHookServerLifecycle extends AgentHookServerRuntimeEnv
     this.endpointFileWritten = false
   }
 
-  stop(): void {
-    // Why: flush the pending debounced write before clearing the map, else a hook <250ms before quit is lost on relaunch.
-    this.flushStatusPersistSync()
+  /** `keepStatus`: quit only. The chat teardown after it still reads each chat's subagents and
+   *  background tasks from the status store to decide what to offer to resume; exit frees it. */
+  stop(options?: { keepStatus?: boolean }): void {
+    // Terminal status may still have a pending write while hook ingress is disabled.
+    if (this.statusHooksEnabled || this.statusPersistTimer) {
+      this.flushStatusPersistSync()
+    }
     this.stopOpenCodeBinderLoop()
+    this.stopTmuxStatus()
     this.rollbackTransportStart()
     this.env = 'production'
     this.onAgentStatus = null
     this.onClaudeStatusLine = null
+    this.clearStartupPromptClaims?.()
+    this.clearStartupPromptClaims = null
+    this.onStartupPromptClaim = null
     this.onPaneStatusCleared = null
     this.onTransportInterference = null
     this.transportInterference.reset()
@@ -214,11 +246,12 @@ export abstract class AgentHookServerLifecycle extends AgentHookServerRuntimeEnv
     }
     this.assistantMessageRetryTimers.clear()
     this.clearAllTranscriptPolls()
+    this.claudeOwedNotificationExpiry.clearAll()
     this.endpointDir = null
     this.endpointFilePathCache = null
     this.endpointFileWritten = false
     this.lastStatusFilePath = null
-    this.lastWrittenJson = null
+    this.closeStatusSnapshotWriter()
     this.runtimeObservedStatusPaneKeys.clear()
     this.paneKeyByTerminalHandle.clear()
     this.hydratedAuthorityCommitments = Object.freeze([])
@@ -239,8 +272,10 @@ export abstract class AgentHookServerLifecycle extends AgentHookServerRuntimeEnv
     this.ownerStateInitialized = false
     // Why: don't unlink the endpoint file — a stale file matches fail-open and avoids a TOCTOU race with a concurrent Orca.
     clearAllListenerCaches(this.state)
-    this.resetCanonicalStatus()
-    this.notifyStatusChangeListeners()
+    if (!options?.keepStatus) {
+      this.resetCanonicalStatus()
+      this.notifyStatusChangeListeners()
+    }
     this.paneStatusClearListeners.clear()
     this.statusDropListeners.clear()
     this.statusChangeListeners.clear()
@@ -249,4 +284,27 @@ export abstract class AgentHookServerLifecycle extends AgentHookServerRuntimeEnv
     this.enrichedStatusListeners.clear()
     this.statusRowMutationListeners.clear()
   }
+}
+
+function writeCheckpointHookResponse(
+  response: ServerResponse,
+  checkpointResponse: Awaited<ReturnType<typeof createAgentCheckpointHookResponse>>
+): void {
+  if (!checkpointResponse) {
+    response.writeHead(204)
+    response.end()
+    return
+  }
+  response.writeHead(checkpointResponse.statusCode, { 'content-type': 'application/json' })
+  response.end(checkpointResponse.body)
+}
+
+function hasCheckpointGateRole(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    'hookRole' in value &&
+    value.hookRole === 'checkpoint'
+  )
 }

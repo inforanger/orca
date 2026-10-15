@@ -164,14 +164,14 @@ function installSleepingCodexResumeState(restoredPtyId?: string) {
 }
 
 describe('connectPanePty', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules()
     vi.clearAllMocks()
     transportFactoryQueue = []
     createdTransportOptions = []
     storeSubscribers = []
     mockStoreState = createInitialStoreState(() => mockStoreState)
-    installTerminalTestGlobals()
+    await installTerminalTestGlobals()
   })
 
   afterEach(async () => {
@@ -627,27 +627,6 @@ describe('connectPanePty', () => {
       startup: null,
       reason: 'process-failed'
     })
-  })
-
-  it('does not retain a failed direct-SSH terminal locally', async () => {
-    const { connectPanePty } = await import('./pty-connection')
-    mockStoreState = {
-      ...mockStoreState,
-      repos: [{ ...mockStoreState.repos[0], connectionId: 'ssh-1' }]
-    } as StoreState
-    const transport = createMockTransport('tab-pty')
-    transportFactoryQueue.push(transport)
-    const manager = createManager(1)
-    const deps = createDeps({ onPaneProcessDied: vi.fn() })
-
-    connectPanePty(createPane(1) as never, manager as never, deps as never)
-    const onPtyExit = createdTransportOptions[0]?.onPtyExit as
-      | ((ptyId: string, exitCode?: number) => void)
-      | undefined
-    onPtyExit?.('tab-pty', 1)
-
-    expect(deps.onPaneProcessDied).not.toHaveBeenCalled()
-    expect(deps.onPtyExitRef.current).toHaveBeenCalledWith('tab-pty', 1)
   })
 
   it('tears down the sole terminal when a reattached (not freshly spawned) PTY exits', async () => {

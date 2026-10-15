@@ -11,6 +11,7 @@ import { statedOrDerivedTurnScope, upsertJournalItem } from './journal-item-fold
 import type { JournalReducerState } from './journal-reducer'
 import type { JournalRow } from './journal-row-schema'
 import { journalDispatchRowApplies } from './journal-dispatch-settlement'
+import { isAgentSessionOptions } from '../../../shared/agent-session-record'
 
 export function applyJournalSubmission(
   state: JournalReducerState,
@@ -25,12 +26,18 @@ export function applyJournalSubmission(
     reason: null,
     submittedAt: row.ts,
     resolvedAt: null,
+    submittedSequence: row.seq,
     ...(row.handoverRecorded ? { handoverRecorded: true, acceptedSequence: row.seq } : {}),
     // A malformed stored link is dropped, never the row.
     ...(typeof row.queuedMessageId === 'string' && row.queuedMessageId.length > 0
       ? { queuedMessageId: row.queuedMessageId }
       : {}),
-    ...(row.origin === 'client' || row.origin === 'host' ? { origin: row.origin } : {})
+    ...(row.origin === 'client' || row.origin === 'host' ? { origin: row.origin } : {}),
+    // Kept as written, a newer build's kind too; an undecodable one as an empty kind, so neither
+    // reads as a row without one.
+    ...(row.source !== undefined ? { source: { kind: storedSourceKind(row.source) } } : {}),
+    // A stored value this build cannot read only loses the model it carried, never the row.
+    ...(isAgentSessionOptions(row.options) ? { options: row.options } : {})
   })
   const itemId = agentJournalSubmissionKey(row.clientMessageId)
   // A message handed over later belongs to no turn until its handover names one.
@@ -42,7 +49,8 @@ export function applyJournalSubmission(
     itemId,
     0,
     journalRenderItem(itemId, 0, row.body, row, turnScope),
-    row.fence
+    // A person's message is no generation's work: its provenance is the fence that accepted it.
+    { fence: row.fence }
   )
 }
 
@@ -69,6 +77,28 @@ export function placeHandedOverMessage(
   })
 }
 
+/** A rejected message — queued, handed over, or sent directly — joins the conversation where it was
+ *  rejected, in no turn: what happened before the rejection happened before it, and the newest page
+ *  holds a recent one. Only a rejection: one in doubt may have reached the agent, so it stays. */
+export function placeRejectedMessage(
+  state: JournalReducerState,
+  submission: AgentJournalSubmission,
+  row: Extract<JournalRow, { kind: 'dispatch' }>
+): void {
+  const itemId = agentJournalSubmissionKey(submission.clientMessageId)
+  const item = state.items.get(itemId)
+  if (row.state !== 'rejected' || !item) {
+    return
+  }
+  const { sequenceIndex: _placed, ...rest } = item
+  state.items.set(itemId, {
+    ...rest,
+    sequence: row.seq,
+    observedAt: row.ts,
+    turnScope: AGENT_JOURNAL_THREAD_SCOPE
+  })
+}
+
 export function acceptSubmissionFromProviderItem(
   state: JournalReducerState,
   providerItemId: string,
@@ -86,7 +116,7 @@ export function acceptSubmissionFromProviderItem(
   }
   submission.fence = row.fence
   submission.dispatchState = 'accepted'
-  notePersonTurnAccepted(state, submission)
+  noteTurnAccepted(state, submission)
   submission.providerItemId = providerItemId
   submission.reason = null
   submission.resolvedAt = row.ts
@@ -99,15 +129,25 @@ export function acceptSubmissionFromProviderItem(
   })
 }
 
-/** A person's turn the provider accepted: the fact the queue's pause is lifted by. */
-export function notePersonTurnAccepted(
+/** A turn the provider accepted, whoever sent it: the fact the queue's pause is lifted by. */
+export function noteTurnAccepted(
   state: JournalReducerState,
-  submission: Pick<AgentJournalSubmission, 'origin' | 'acceptedSequence'>
+  submission: Pick<AgentJournalSubmission, 'acceptedSequence'>
 ): void {
-  if (submission.origin === 'client' && submission.acceptedSequence !== undefined) {
-    state.latestPersonTurnSequence = Math.max(
-      state.latestPersonTurnSequence,
+  if (submission.acceptedSequence !== undefined) {
+    state.latestAcceptedTurnSequence = Math.max(
+      state.latestAcceptedTurnSequence,
       submission.acceptedSequence
     )
   }
+}
+
+/** A stored source's kind; an undecodable value reads as an empty kind, never a person's. */
+function storedSourceKind(stored: unknown): string {
+  return typeof stored === 'object' &&
+    stored !== null &&
+    'kind' in stored &&
+    typeof stored.kind === 'string'
+    ? stored.kind
+    : ''
 }

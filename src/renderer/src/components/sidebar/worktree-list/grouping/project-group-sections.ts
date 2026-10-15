@@ -8,12 +8,12 @@ import { getEffectiveProjectGroupManualRank } from '../../../../../../shared/pro
 import { PROJECT_GROUP_META, getProjectGroupHeaderKey } from './group-keys'
 import { appendOrderedGroups } from './group-sections'
 import type { SectionAppendContext } from './group-sections'
-import type { OrderedGroupEntry } from './project-grouping'
+import type { OrderedGroupEntry } from './worktree-group-entry'
 import {
   compareRecentRank,
-  recentRankForEntry,
+  createRecentRankLookup,
   withRepoSectionDisplayLabels
-} from './section-order'
+} from '../../../../../../shared/project-section-order'
 import { buildFolderWorkspaceRow } from './row-builders'
 
 export function appendProjectGroupSections(
@@ -40,8 +40,12 @@ export function appendProjectGroupSections(
 
   const sortRepoEntriesWithinGroup = (entries: OrderedGroupEntry[]): OrderedGroupEntry[] => {
     if (projectOrderBy === 'recent') {
+      if (entries.length < 2) {
+        return [...entries]
+      }
+      const getRecentRank = createRecentRankLookup()
       return [...entries].sort((left, right) =>
-        compareRecentRank(recentRankForEntry(left), recentRankForEntry(right))
+        compareRecentRank(getRecentRank(left), getRecentRank(right))
       )
     }
     // Manual: within a Project Group, projects order by their per-group rank

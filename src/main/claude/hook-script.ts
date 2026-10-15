@@ -1,4 +1,5 @@
 import { buildHookProcessCapture } from '../agent-hooks/hook-process-capture'
+import { getAgentCheckpointUnavailableDecision } from '../agent-checkpoint/agent-checkpoint-tool-policy'
 /** The managed Claude-compatible hook script, built for local, POSIX-remote and Windows targets.
  *  Split from hook-service.ts so the service owns install/status and this owns script text,
  *  mirroring the same split under src/main/cursor/. */
@@ -29,20 +30,23 @@ export function getManagedScript(
     source?: AgentHookSource
     skipWhenDevinImportsClaude?: boolean
     skipWhenGrokImportsClaude?: boolean
+    checkpointGate?: boolean
   } = {}
 ): string {
   const source = options.source ?? 'claude'
+  const checkpointFallback = options.checkpointGate
+    ? getAgentCheckpointUnavailableDecision('claude')
+    : '{"systemMessage":"ORCA CHECKPOINT DELIVERY ERROR: the authenticated Orca hook endpoint is unavailable; checkpoint text was not delivered and this fallback does not block mutations."}'
   if (target === 'local' && process.platform === 'win32') {
     return [
       '@echo off',
       'setlocal',
-      // Why: Claude-compatible permission hooks fail closed on empty stdout (#14818).
-      'echo {}',
       // Why: refresh endpoint coordinates for PTYs surviving an Orca restart.
       'if defined ORCA_AGENT_HOOK_ENDPOINT if exist "%ORCA_AGENT_HOOK_ENDPOINT%" call "%ORCA_AGENT_HOOK_ENDPOINT%" 2>nul',
       // Why (#11549): the env guards must outrank the Devin skip — the Devin skip parks in more.com,
       // and outside an Orca pane the caller can abandon stdin, so more.com never returns.
-      ...buildWindowsHookEnvironmentGuardLines(),
+      ...buildWindowsHookEnvironmentGuardLines(checkpointFallback),
+      ...(options.checkpointGate ? ['set "ORCA_AGENT_HOOK_ROLE=checkpoint"'] : []),
       WINDOWS_CLAUDE_BACKGROUND_JOB_GUARD,
       ...(options.skipWhenGrokImportsClaude ? buildWindowsGrokReplayGuardLines() : []),
       ...(options.skipWhenDevinImportsClaude
@@ -52,7 +56,14 @@ export function getManagedScript(
           ]
         : []),
       // Why: use curl.exe to avoid an extra PowerShell startup per hook.
-      buildWindowsAgentHookCurlPostCommand(source),
+      buildWindowsAgentHookCurlPostCommand(source, {
+        outputResponse: true,
+        failOnHttpError: true,
+        ...(options.checkpointGate ? { hookRole: 'checkpoint' as const } : {})
+      }),
+      ...(options.checkpointGate
+        ? [`if errorlevel 1 echo ${checkpointFallback}`]
+        : ['if errorlevel 1 echo {"systemMessage":"ORCA CHECKPOINT DELIVERY ERROR: the authenticated Orca hook endpoint did not respond; checkpoint text was not delivered and this fallback does not block mutations."}']),
       'exit /b 0',
       ...buildWindowsHookStdinDrainEpilogue(),
       ''
@@ -61,10 +72,9 @@ export function getManagedScript(
 
   return [
     '#!/bin/sh',
-    // Why: Claude-compatible permission hooks fail closed on empty stdout (#14818).
-    'printf "{}\\n"',
     ...buildPosixHookPayloadCapture(),
     ...(options.skipWhenGrokImportsClaude ? buildPosixGrokReplayGuardLines() : []),
+    ...(options.checkpointGate ? ['ORCA_AGENT_HOOK_ROLE=checkpoint'] : []),
     ...buildPosixHookSpoolLines(source),
     ...(options.skipWhenDevinImportsClaude
       ? [
@@ -87,12 +97,20 @@ export function getManagedScript(
     '  . "$ORCA_AGENT_HOOK_ENDPOINT" 2>/dev/null || :',
     'fi',
     'if [ -z "$ORCA_AGENT_HOOK_PORT" ] || [ -z "$ORCA_AGENT_HOOK_TOKEN" ] || [ -z "$ORCA_PANE_KEY" ]; then',
-    '  spool_hook_event',
+    '  if [ -n "$ORCA_PANE_KEY" ] && [ -n "$ORCA_AGENT_HOOK_ENDPOINT" ] && [ -r "$ORCA_AGENT_HOOK_ENDPOINT" ]; then',
+    `    printf '%s\\n' '${checkpointFallback}'`,
+    '    spool_hook_event',
+    '  fi',
     '  exit 0',
     'fi',
     // Why: keep full hook JSON off the command line and avoid IDS-friendly URL-encoded paths.
-    ...buildPosixAgentHookPostCommand(source).map((line, index, lines) =>
-      index === lines.length - 1 ? `${line} >/dev/null 2>&1 || spool_hook_event` : line
+    ...buildPosixAgentHookPostCommand(source, {
+      failOnHttpError: true,
+      ...(options.checkpointGate ? { hookRole: 'checkpoint' as const } : {})
+    }).map((line, index, lines) =>
+      index === lines.length - 1
+        ? `${line} || { printf '%s\\n' '${checkpointFallback}'; spool_hook_event; }`
+        : line
     ),
     'exit 0',
     ''

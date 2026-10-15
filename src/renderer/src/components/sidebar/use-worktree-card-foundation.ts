@@ -32,6 +32,7 @@ export function useWorktreeCardFoundation({
   const openAutomationsPage = useAppStore((s) => s.openAutomationsPage)
   const setPendingAutomationRunNavigation = useAppStore((s) => s.setPendingAutomationRunNavigation)
   const updateWorktreeMeta = useAppStore((s) => s.updateWorktreeMeta)
+  const setWorkspaceUnreadByUser = useAppStore((s) => s.setWorkspaceUnreadByUser)
   const deleteFolderWorkspace = useAppStore((s) => s.deleteFolderWorkspace)
   const setActiveWorktree = useAppStore((s) => s.setActiveWorktree)
   const renamingWorktreeId = useAppStore((s) => s.renamingWorktreeId)
@@ -60,6 +61,21 @@ export function useWorktreeCardFoundation({
         currentPR: worktree.linkedPR,
         currentComment: worktree.comment,
         focus: 'issue'
+      })
+    },
+    [worktree, openModal]
+  )
+
+  const handleManageLinks = useCallback(
+    (event: React.MouseEvent) => {
+      event.stopPropagation()
+      openModal('edit-meta', {
+        worktreeId: worktree.id,
+        repoId: worktree.repoId,
+        executionHostId: worktree.hostId,
+        currentDisplayName: worktree.displayName,
+        currentComment: worktree.comment,
+        focus: 'links'
       })
     },
     [worktree, openModal]
@@ -206,6 +222,7 @@ export function useWorktreeCardFoundation({
     openModal,
     openTaskPage,
     updateWorktreeMeta,
+    setWorkspaceUnreadByUser,
     deleteFolderWorkspace,
     setActiveWorktree,
     renamingWorktreeId,
@@ -220,6 +237,7 @@ export function useWorktreeCardFoundation({
     newCardStyle,
     compactCards,
     handleEditIssue,
+    handleManageLinks,
     handleEditComment,
     handleOpenAutomation,
     handleOpenAutomationRun,

@@ -1,3 +1,4 @@
+import { candidateFileTime } from './antigravity-transcript-candidates'
 import type {
   AiVaultListResult,
   AiVaultScanIssue,
@@ -13,10 +14,7 @@ import {
   type AntigravityWorkspaceResolver
 } from './session-scanner-antigravity-history'
 import { sessionCandidatesFromDiscoveries } from './session-scanner-candidates'
-import {
-  ensureSessionParseCacheLoaded,
-  scheduleSessionParseCachePersist
-} from './session-parse-cache-persistence'
+import { ensureSessionParseCacheLoaded } from './session-parse-cache-persistence'
 import {
   createSessionParseStats,
   parseAgentSessionFileCached,
@@ -44,6 +42,7 @@ import { clampPositiveInteger, errorMessage } from './session-scanner-values'
 import { throwIfAiVaultScanCancelled } from './ai-vault-scan-cancellation'
 import { DEFAULT_AI_VAULT_SCAN_LIMIT } from '../../shared/ai-vault-session-depth'
 import { withDevinSessionsDbScan } from './session-scanner-devin-db'
+import { withOpenCodeSqliteScanScope } from './session-scanner-opencode-sqlite-scan-scope'
 
 const SESSION_PARSE_CONCURRENCY = 8
 const SESSION_PARSE_CANDIDATE_MULTIPLIER = 2
@@ -60,6 +59,10 @@ const SESSION_PARSE_CANDIDATE_MULTIPLIER = 2
 export async function scanAiVaultSessions(
   options: AiVaultScanOptions = {}
 ): Promise<AiVaultListResult> {
+  return withOpenCodeSqliteScanScope(() => scanAiVaultSessionStores(options))
+}
+
+async function scanAiVaultSessionStores(options: AiVaultScanOptions): Promise<AiVaultListResult> {
   // The span makes scan cost visible in the local trace file: STA-1278-style
   // "one core pegged" reports need to show whether transcript scanning is the
   // subsystem burning CPU, and how much of each scan the cache absorbed.
@@ -78,8 +81,8 @@ export async function scanAiVaultSessions(
         const executionHostId = options.executionHostId ?? LOCAL_EXECUTION_HOST_ID
         const issues: AiVaultScanIssue[] = []
         const parseStats = createSessionParseStats()
-        const antigravityWorkspaceResolver = createAntigravityWorkspaceResolver(
-          readLocalAntigravityHistory
+        const antigravityWorkspaceResolver = createAntigravityWorkspaceResolver((path) =>
+          readLocalAntigravityHistory(path, options.signal)
         )
         // Why: persisted entries must be seeded before any candidate is parsed, or
         // the cold scan gains nothing from the cache file (#9210).
@@ -135,8 +138,6 @@ export async function scanAiVaultSessions(
         span.setAttribute('earlyStopped', parseStats.earlyStopped)
         span.setAttribute('bytesRead', parseStats.bytesRead)
         span.setAttribute('issues', issues.length)
-
-        scheduleSessionParseCachePersist(parseStats)
 
         return {
           sessions: mergeSessions(cappedSessions, scopeSessions),
@@ -229,11 +230,12 @@ async function parseSessionCandidates(args: {
   antigravityWorkspaceResolver?: AntigravityWorkspaceResolver
 }): Promise<AiVaultSession[]> {
   const sessions = new ScannedSessionCollection()
-  let index = 0
 
-  while (index < args.candidates.length) {
+  for (let index = 0; index < args.candidates.length;) {
     throwIfAiVaultScanCancelled(args.signal)
-    if (canStopParsingSessions(sessions, args.limit, args.candidates[index]?.file.mtimeMs)) {
+    if (
+      canStopParsingSessions(sessions, args.limit, candidateFileTime(args.candidates[index]?.file))
+    ) {
       break
     }
 
@@ -253,6 +255,9 @@ async function parseSessionCandidates(args: {
         )
       )
     )
+    // An abort can land while a batch settles: a read it cut short is not that
+    // file's issue, and a partial parse must never be cached or returned.
+    throwIfAiVaultScanCancelled(args.signal)
 
     for (const result of results) {
       if (result.issue) {
@@ -266,9 +271,6 @@ async function parseSessionCandidates(args: {
     index += batchSize
   }
 
-  // An abort can land while the final batch settles; observe it here so a
-  // partial parse is never cached or returned as a complete scan.
-  throwIfAiVaultScanCancelled(args.signal)
   return [...sessions.values()]
 }
 

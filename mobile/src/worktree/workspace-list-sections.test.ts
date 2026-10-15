@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { Worktree } from './workspace-list-sections'
 import {
   CREATE_GRACE_MS,
+  NO_PROJECT_SECTION_CATALOG,
   buildSections,
   filterWorktrees,
   getWorktreeStatus,
@@ -23,7 +24,6 @@ function worktree(overrides: Partial<Worktree> = {}): Worktree {
     path: worktreePath,
     liveTerminalCount: 0,
     hasAttachedPty: false,
-    preview: '',
     unread: false,
     isPinned: false,
     linkedPR: null,
@@ -33,8 +33,16 @@ function worktree(overrides: Partial<Worktree> = {}): Worktree {
   }
 }
 
+// A catalog of [displayName, id] repos with no project rows, as an old desktop answers.
+function catalogOf(repos: readonly (readonly [string, string])[]) {
+  return {
+    ...NO_PROJECT_SECTION_CATALOG,
+    repos: repos.map(([displayName, id]) => ({ id, displayName, path: `/repos/${id}` }))
+  }
+}
+
 function withoutSectionListKeys(sections: ReturnType<typeof buildSections>) {
-  return sections.map((section) => ({
+  return sections.map(({ repo: _repo, ...section }) => ({
     ...section,
     data: section.data.map(
       ({
@@ -212,6 +220,19 @@ describe('filterWorktrees', () => {
       )
     ).toEqual([folder])
   })
+
+  it("drops rows the desktop's Hide other-client workspaces hides", () => {
+    const mine = worktree({ worktreeId: 'mine' })
+    const other = worktree({ worktreeId: 'other', desktopOtherClient: true })
+
+    expect(
+      filterWorktrees(
+        [mine, other],
+        { filterRepoIds: new Set(), hideSleeping: false, hideDefaultBranch: false },
+        ''
+      )
+    ).toEqual([mine])
+  })
 })
 
 describe('getWorktreeStatus', () => {
@@ -281,7 +302,7 @@ describe('buildSections', () => {
       '',
       'workspaceStatus',
       new Set(),
-      new Map(),
+      NO_PROJECT_SECTION_CATALOG,
       DEFAULT_MOBILE_WORKSPACE_STATUSES
     )
 
@@ -327,7 +348,7 @@ describe('buildSections', () => {
       '',
       'workspaceStatus',
       new Set(),
-      new Map(),
+      NO_PROJECT_SECTION_CATALOG,
       DEFAULT_MOBILE_WORKSPACE_STATUSES
     )
 
@@ -513,7 +534,7 @@ describe('buildSections', () => {
       '',
       'repo',
       new Set(),
-      new Map([['orca', 'repo-1']]),
+      catalogOf([['orca', 'repo-1']]),
       DEFAULT_MOBILE_WORKSPACE_STATUSES
     )
 
@@ -544,7 +565,7 @@ describe('buildSections', () => {
       '',
       'repo',
       new Set(),
-      new Map([['orca', 'repo-1']])
+      catalogOf([['orca', 'repo-1']])
     )
 
     expect(sections[0]?.data.map((item) => item.worktreeId)).toEqual(['main', 'child'])
@@ -558,7 +579,7 @@ describe('buildSections', () => {
       '',
       'repo',
       new Set(),
-      new Map([
+      catalogOf([
         ['orca', 'repo-1'],
         ['zoom-img', 'repo-missing']
       ])
@@ -582,7 +603,7 @@ describe('buildSections', () => {
       '',
       'none',
       new Set(),
-      new Map([['zoom-img', 'repo-missing']])
+      catalogOf([['zoom-img', 'repo-missing']])
     )
 
     expect(withoutSectionListKeys(sections)).toEqual([])
@@ -600,7 +621,7 @@ describe('buildSections', () => {
       'zoom',
       'repo',
       new Set(),
-      new Map([
+      catalogOf([
         ['zoom-img', 'repo-matching'],
         ['repo', 'repo-hidden'],
         ['zoom-hidden', 'repo-unfiltered']
@@ -625,7 +646,7 @@ describe('buildSections', () => {
       '',
       'repo',
       new Set(),
-      new Map([
+      catalogOf([
         ['sleeping-repo', 'repo-sleeping'],
         ['empty-repo', 'repo-empty']
       ])
@@ -655,7 +676,7 @@ describe('buildSections', () => {
       '',
       'workspaceStatus',
       new Set(),
-      new Map(),
+      NO_PROJECT_SECTION_CATALOG,
       DEFAULT_MOBILE_WORKSPACE_STATUSES
     )
 
@@ -679,7 +700,7 @@ describe('buildSections', () => {
       '',
       'workspaceStatus',
       new Set(),
-      new Map(),
+      NO_PROJECT_SECTION_CATALOG,
       []
     )
 
@@ -689,28 +710,68 @@ describe('buildSections', () => {
     expect(sections[0]?.data.map((worktree) => worktree.worktreeId)).toEqual(['progress'])
   })
 
-  it('keeps pinned worktrees in their canonical status group like desktop', () => {
-    const pinned = worktree({
-      worktreeId: 'pinned',
-      workspaceStatus: 'in-progress',
-      isPinned: true
-    })
+  describe.each(['none', 'repo', 'workspaceStatus', 'prStatus'] as const)(
+    'pinned placement in %s grouping',
+    (groupMode) => {
+      const sibling = worktree({ worktreeId: 'sibling', workspaceStatus: 'in-progress' })
+      const hostPinned = worktree({
+        worktreeId: 'host-pinned',
+        workspaceStatus: 'in-progress',
+        isPinned: true
+      })
+      const localPinned = worktree({ worktreeId: 'local-pinned', workspaceStatus: 'in-progress' })
+
+      function placement(showPinnedInGroups: boolean) {
+        const sections = buildSections(
+          [sibling, hostPinned, localPinned],
+          'name',
+          { filterRepoIds: new Set(), hideSleeping: false, hideDefaultBranch: false },
+          '',
+          groupMode,
+          new Set(['local-pinned']),
+          NO_PROJECT_SECTION_CATALOG,
+          DEFAULT_MOBILE_WORKSPACE_STATUSES,
+          new Set(),
+          showPinnedInGroups
+        )
+        const ids = (keep: (key: string) => boolean) =>
+          sections
+            .filter((section) => keep(section.key))
+            .flatMap((section) => section.data.map((row) => row.worktreeId))
+            .sort()
+        return { pinned: ids((key) => key === 'pinned'), groups: ids((key) => key !== 'pinned') }
+      }
+
+      it('shows host and local pins only in Pinned by default', () => {
+        expect(placement(false)).toEqual({
+          pinned: ['host-pinned', 'local-pinned'],
+          groups: ['sibling']
+        })
+      })
+
+      it('also keeps them in their groups when the desktop setting is on', () => {
+        expect(placement(true)).toEqual({
+          pinned: ['host-pinned', 'local-pinned'],
+          groups: ['host-pinned', 'local-pinned', 'sibling']
+        })
+      })
+    }
+  )
+
+  it('drops a repo group whose only worktree is pinned, like desktop', () => {
+    const pinned = worktree({ worktreeId: 'pinned', isPinned: true })
 
     const sections = buildSections(
       [pinned],
-      'manual',
+      'name',
       { filterRepoIds: new Set(), hideSleeping: false, hideDefaultBranch: false },
       '',
-      'workspaceStatus',
+      'repo',
       new Set(),
-      new Map(),
-      DEFAULT_MOBILE_WORKSPACE_STATUSES
+      catalogOf([['orca', 'repo-1']])
     )
 
-    expect(withoutSectionListKeys(sections)).toEqual([
-      { key: 'pinned', title: 'Pinned', icon: 'pin', data: [pinned] },
-      { key: 'workspace-status:in-progress', title: 'In progress', data: [pinned] }
-    ])
+    expect(sections.map((section) => section.key)).toEqual(['pinned'])
   })
 
   it('renders one sorted All section when grouping is off like desktop', () => {
@@ -734,7 +795,7 @@ describe('buildSections', () => {
       '',
       'none',
       new Set(),
-      new Map(),
+      NO_PROJECT_SECTION_CATALOG,
       DEFAULT_MOBILE_WORKSPACE_STATUSES
     )
 
@@ -765,7 +826,7 @@ describe('buildSections', () => {
       '',
       'workspaceStatus',
       new Set(),
-      new Map(),
+      NO_PROJECT_SECTION_CATALOG,
       DEFAULT_MOBILE_WORKSPACE_STATUSES
     )
 
@@ -793,7 +854,7 @@ describe('buildSections', () => {
       '',
       'workspaceStatus',
       new Set(),
-      new Map(),
+      NO_PROJECT_SECTION_CATALOG,
       DEFAULT_MOBILE_WORKSPACE_STATUSES,
       new Set([getMobileWorkspaceLineageGroupKey(parent)])
     )

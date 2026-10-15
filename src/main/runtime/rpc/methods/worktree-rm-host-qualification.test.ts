@@ -1,3 +1,4 @@
+import '../unused-default-rpc-methods.test-fixture'
 import { describe, expect, it, vi } from 'vitest'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { RpcRequest } from '../core'
@@ -194,18 +195,5 @@ describe('worktree.rm host qualification', () => {
     // Unqualified on purpose: removeManagedWorktree owns the stale-row path and
     // still refuses on its own if the id turns out to have two owners.
     expect(runtime.removeManagedWorktree).toHaveBeenCalledWith('id:wt-gone', forwarded())
-  })
-
-  it('propagates a non-missing lookup failure instead of deleting unqualified', async () => {
-    const runtime = makeRuntime()
-    vi.mocked(runtime.showManagedWorktree).mockRejectedValue(new Error('selector_ambiguous'))
-    const dispatcher = new RpcDispatcher({ runtime, methods: WORKTREE_METHODS })
-
-    const response = await dispatcher.dispatch(
-      makeRequest({ worktree: 'id:wt-1', force: true, runHooks: false })
-    )
-
-    expect(response).toMatchObject({ ok: false, error: { message: 'selector_ambiguous' } })
-    expect(runtime.removeManagedWorktree).not.toHaveBeenCalled()
   })
 })

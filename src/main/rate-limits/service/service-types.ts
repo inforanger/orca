@@ -1,4 +1,5 @@
 import type { ProviderRateLimits } from '../../../shared/rate-limit-types'
+import type { ZcodePlanSite } from '../../../shared/zcode-plan-sites'
 import type { ClaudeRuntimeAuthPreparation } from '../../claude-accounts/runtime-auth-service'
 import type { ClaudeAccountSelectionTarget } from '../../claude-accounts/runtime-selection'
 import type { KimiHomeResolution } from '../../kimi/kimi-runtime-home'
@@ -35,7 +36,7 @@ export type InactiveCodexAccountInfo = {
 
 export type CodexHomePathResolver = (
   target?: CodexAccountSelectionTarget
-) => CodexRateLimitHomeResolution
+) => CodexRateLimitHomeResolution | Promise<CodexRateLimitHomeResolution>
 export type KimiHomeResolver = () => Promise<KimiHomeResolution>
 export type ClaudeAuthPreparationResolver = (
   target?: ClaudeAccountSelectionTarget
@@ -44,8 +45,15 @@ export type ClaudeAuthPreparationResolver = (
 export type OpenCodeGoRateLimitConfig = {
   sessionCookie: string
   workspaceIdOverride: string
-  /** Explicit Orca override; empty means fall back to env and OpenCode's own store. */
+}
+
+export type OpenCodeGoResolvedConfig = OpenCodeGoRateLimitConfig & {
+  /** Explicit Orca override; empty means fall back to OpenCode's own store and env. */
   apiKey: string
+  /** Set when the saved override exists but cannot be decrypted. */
+  apiKeyError: string | null
+  /** Set when the saved override exists but a transient read failure skipped it this cycle. */
+  apiKeyReadSkipped: boolean
 }
 
 export type MiniMaxRateLimitConfig = {
@@ -58,6 +66,16 @@ export type MiniMaxRateLimitConfig = {
 
 export type MiniMaxResolvedConfig = {
   config: MiniMaxRateLimitConfig
+  error: string | null
+}
+
+export type ZcodePlanRateLimitConfig = {
+  site: ZcodePlanSite
+  apiKey: string
+}
+
+export type ZcodePlanResolvedConfig = {
+  config: ZcodePlanRateLimitConfig
   error: string | null
 }
 
@@ -142,23 +160,6 @@ export function normalizeClaudeConfigDir(dir: string | null | undefined): string
   // Why: normalize mixed Windows separators for path attribution; preserve Linux case sensitivity.
   const trimmed = dir?.trim().replace(/\\/g, '/').replace(/\/+$/, '')
   return trimmed || null
-}
-
-export function delayUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) {
-    return Promise.resolve()
-  }
-  return new Promise((resolve) => {
-    const onAbort = (): void => {
-      clearTimeout(timer)
-      resolve()
-    }
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort)
-      resolve()
-    }, ms)
-    signal.addEventListener('abort', onAbort, { once: true })
-  })
 }
 
 export function isSameUsageWindow(

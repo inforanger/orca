@@ -51,6 +51,8 @@ export const UNVALIDATED_RPC_REQUEST_PORT_OWNERS: readonly UnvalidatedRpcRequest
   { file: 'src/transport/rpc-client.ts', references: 2 },
   // The typed boundary itself — the one module that turns a reply into a declared type.
   { file: 'src/transport/rpc-operation.ts', references: 5 },
+  // Forwards the port with the workspace's execution host stamped on; picks no method.
+  { file: 'src/transport/execution-host-scoped-rpc-client.ts', references: 2 },
   // Forwards the port across a physical-client cutover.
   { file: 'src/transport/stable-logical-rpc-client.ts', references: 2 },
   // Names the port as the recording oracle's sender contract; a non-test file for the same reason.
@@ -98,23 +100,16 @@ export const UNVALIDATED_RPC_REQUEST_PORT_PENDING: readonly UnvalidatedRpcReques
   // in tasks/mobile-workspace-source-operations.ts, and the repo.list readers the dialog now shares
   // in session/mobile-session-read-operations.ts.
 
-  // src/host-screen/ — host screen catalog and actions. The repo and label metadata reads, the
-  // desktop view-settings mirror and the list's pin, remove and activate mutations migrated in
-  // step 4; see host-screen-operations.ts.
-  // Holdout: the last `worktree.sleep` is an `onPress` this file builds for `ActionSheetContent`,
-  // which renders only inside an open `BottomDrawer`. Nothing gates those children — the drawer
-  // mounts on `visible || mounted` and `MountedBottomDrawer` renders them unconditionally inside
-  // its `Modal`. The block is that module's imports: reanimated and gesture-handler, neither of
-  // which has a substitute, so reaching this send means standing in for both engines rather than
-  // pinning a device input.
-  { file: 'src/host-screen/host-screen-overlays.tsx', references: 1 },
+  // src/host-screen/ — host screen catalog and actions. Nothing is left here: the repo and label
+  // metadata reads, the desktop view-settings mirror and the list's pin, remove and activate
+  // mutations migrated in step 4, and the row sleep followed once it moved into the actions hook;
+  // see host-screen-operations.ts.
 
   // src/notifications/ — push registration and delivery. Nothing is left here. Registration and
   // unregistration migrated in step 4; see mobile-push-registration-operations.ts. Tray
   // reconciliation followed once a scenario could declare the notification tray and the stored host
-  // list it resolves against; see push-dismissal-operations.ts. The stream unsubscribe inside the
-  // `notifications.subscribe` callback migrated in step 6 once the recorder could script the
-  // `ready` frame that hands it a subscription id; see desktop-notification-stream-operations.ts.
+  // list it resolves against; see push-dismissal-operations.ts. The stream's `notifications.unsubscribe`
+  // is no longer a request here: the stream transport sends it with the id from the current `ready`.
 
   // src/session/ — session screen: chat, diff review, PR actions, tabs. The github.* PR surface,
   // the diff-review loaders and the rest of the screen migrated in step 4; see

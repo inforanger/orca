@@ -6,7 +6,6 @@ import {
   getSharedManagedScriptPath,
   readHooksJson,
   wrapPosixHookCommand,
-  wrapWindowsCmdHookCommand,
   writeHooksJson,
   writeManagedScript,
   type HookDefinition
@@ -16,12 +15,23 @@ import {
   writeHooksJsonRemote,
   writeManagedScriptRemote
 } from '../agent-hooks/installer-utils-remote'
-import { refreshManagedScriptIfPresent } from '../agent-hooks/managed-hook-script-refresh'
+import { wrapWindowsBatchHookCommand } from '../agent-hooks/windows-direct-cmd-hook-command'
+import { WINDOWS_ANTIGRAVITY_JSON_POST_SCRIPT } from './windows-hook-json-post'
+import {
+  restoreManagedScript,
+  refreshManagedScriptIfPresent,
+  scriptStillExists
+} from '../agent-hooks/managed-hook-script-refresh'
 import {
   ANTIGRAVITY_EVENTS,
+  ANTIGRAVITY_CHECKPOINT_GATE_WRAPPER_FILE_NAME,
   ANTIGRAVITY_PRE_TOOL_USE_DECISION,
   type AntigravityEvent
 } from './hook-events'
+import {
+  getAgentCheckpointToolMatcher,
+  getAgentCheckpointUnavailableDecision
+} from '../agent-checkpoint/agent-checkpoint-tool-policy'
 import { quotePosixShellString } from '../agent-hooks/posix-hook-command'
 import { getManagedScript, getWindowsWrapperScript } from './hook-script'
 import {
@@ -39,6 +49,15 @@ function getConfigPath(): string {
   return join(homedir(), '.gemini', 'config', 'hooks.json')
 }
 
+const CONTEXT_DELIVERY_ERROR = JSON.stringify({
+  injectSteps: [
+    {
+      ephemeralMessage:
+        'ORCA CHECKPOINT DELIVERY ERROR: the managed Antigravity hook script is missing; checkpoint text was not delivered.'
+    }
+  ]
+})
+
 function getManagedScriptFileName(): string {
   return process.platform === 'win32' ? 'antigravity-hook.cmd' : 'antigravity-hook.sh'
 }
@@ -47,39 +66,80 @@ function getManagedScriptPath(): string {
   return getSharedManagedScriptPath(getManagedScriptFileName())
 }
 
-function getWindowsWrapperScriptPath(event: AntigravityEvent): string {
+function getWindowsWrapperScriptPath(event: AntigravityEvent, checkpointGate = false): string {
+  if (checkpointGate) {
+    return getSharedManagedScriptPath(ANTIGRAVITY_CHECKPOINT_GATE_WRAPPER_FILE_NAME)
+  }
   return getSharedManagedScriptPath(event.windowsWrapperFileName)
 }
 
-function getPosixManagedCommand(scriptPath: string, event: AntigravityEvent): string {
+function getPosixManagedCommand(
+  scriptPath: string,
+  event: AntigravityEvent,
+  checkpointGate = false
+): string {
   const command = wrapPosixHookCommand(
     scriptPath,
     { ORCA_ANTIGRAVITY_EVENT: event.eventName },
-    // Why: a missing managed script must not brick tools; the guard answers PreToolUse itself instead of staying silent.
-    event.eventName === 'PreToolUse' ? { fallbackStdout: ANTIGRAVITY_PRE_TOOL_USE_DECISION } : {}
+    event.eventName === 'PreToolUse'
+      ? {
+          fallbackStdout: checkpointGate
+            ? getAgentCheckpointUnavailableDecision('antigravity')
+            : ANTIGRAVITY_PRE_TOOL_USE_DECISION
+        }
+      : event.eventName === 'SessionStart' || event.eventName === 'PreInvocation'
+        ? { fallbackStdout: CONTEXT_DELIVERY_ERROR, requiredEnvVar: 'ORCA_PANE_KEY' }
+        : {}
   )
   // ACP hosts tokenize the command into argv; the shell must be the executable, not `if`.
-  return `/bin/sh -c ${quotePosixShellString(command)}`
+  return `/bin/sh -c ${quotePosixShellString(
+    `${checkpointGate ? 'ORCA_AGENT_HOOK_ROLE=checkpoint ' : ''}${command}`
+  )}`
 }
 
-function getManagedCommand(scriptPath: string, event: AntigravityEvent): string {
+function getManagedCommand(
+  scriptPath: string,
+  event: AntigravityEvent,
+  checkpointGate = false
+): string {
   if (process.platform === 'win32') {
-    return wrapWindowsCmdHookCommand(getWindowsWrapperScriptPath(event))
+    return wrapWindowsBatchHookCommand(getWindowsWrapperScriptPath(event, checkpointGate))
   }
-  return getPosixManagedCommand(scriptPath, event)
+  return getPosixManagedCommand(scriptPath, event, checkpointGate)
 }
 
 export class AntigravityHookService {
+  private getWindowsRuntimePath = (): string => process.execPath
+
+  setWindowsRuntimePathProvider(provider: () => string): void {
+    this.getWindowsRuntimePath = provider
+  }
+
   async refreshManagedScripts(): Promise<void> {
-    await refreshManagedScriptIfPresent(getManagedScriptPath(), getManagedScript())
-    if (process.platform === 'win32') {
+    const runtimePath = process.platform === 'win32' ? this.getWindowsRuntimePath() : undefined
+    if (process.platform === 'win32' && (await scriptStillExists(getManagedScriptPath()))) {
+      await restoreManagedScript(
+        getSharedManagedScriptPath('antigravity-hook-post.cjs'),
+        WINDOWS_ANTIGRAVITY_JSON_POST_SCRIPT
+      )
       for (const event of ANTIGRAVITY_EVENTS) {
         await refreshManagedScriptIfPresent(
           getWindowsWrapperScriptPath(event),
           getWindowsWrapperScript(event.eventName)
         )
       }
+      const preToolUseEvent = ANTIGRAVITY_EVENTS.find((event) => event.eventName === 'PreToolUse')
+      if (preToolUseEvent) {
+        await refreshManagedScriptIfPresent(
+          getWindowsWrapperScriptPath(preToolUseEvent, true),
+          getWindowsWrapperScript('PreToolUse', 'checkpoint')
+        )
+      }
     }
+    await refreshManagedScriptIfPresent(
+      getManagedScriptPath(),
+      getManagedScript('local', runtimePath)
+    )
   }
 
   getStatus(): AgentHookInstallStatus {
@@ -98,9 +158,15 @@ export class AntigravityHookService {
 
     const bundle = getBundle(config)
     const isManagedCommand = createAntigravityManagedCommandMatcher()
-    const currentCommands = new Set(
-      ANTIGRAVITY_EVENTS.map((event) => getManagedCommand(scriptPath, event))
-    )
+    const preToolUseEvent = ANTIGRAVITY_EVENTS.find((event) => event.eventName === 'PreToolUse')
+    const matcher = getAgentCheckpointToolMatcher('antigravity')
+    const gateCommand = preToolUseEvent && matcher
+      ? getManagedCommand(scriptPath, preToolUseEvent, true)
+      : null
+    const currentCommands = new Set([
+      ...ANTIGRAVITY_EVENTS.map((event) => getManagedCommand(scriptPath, event)),
+      ...(gateCommand ? [gateCommand] : [])
+    ])
     const staleManagedPresent = bundleHasStaleManagedCommand(
       bundle,
       isManagedCommand,
@@ -118,8 +184,19 @@ export class AntigravityHookService {
         missing.push(event.eventName)
       }
     }
+    const preToolUseDefinitions = hookDefinitions(bundle.PreToolUse)
+    const gatePresent = gateCommand !== null && matcher !== null &&
+      preToolUseDefinitions.some(
+        (definition) =>
+          definition.matcher === matcher &&
+          Array.isArray(definition.hooks) &&
+          definition.hooks.some((hook) => hook.command === gateCommand)
+      )
+    if (!gatePresent) {
+      missing.push('PreToolUse checkpoint gate')
+    }
 
-    const managedHooksPresent = presentCount > 0 || staleManagedPresent
+    const managedHooksPresent = presentCount > 0 || gatePresent || staleManagedPresent
     let state: AgentHookInstallState
     let detail: string | null
     if (missing.length === 0 && !staleManagedPresent) {
@@ -155,9 +232,23 @@ export class AntigravityHookService {
     buildInstalledConfig(
       config,
       (event) => getManagedCommand(scriptPath, event),
-      createAntigravityManagedCommandMatcher()
+      createAntigravityManagedCommandMatcher(),
+      (() => {
+        const matcher = getAgentCheckpointToolMatcher('antigravity')
+        const event = ANTIGRAVITY_EVENTS.find((item) => item.eventName === 'PreToolUse')
+        return matcher && event
+          ? { matcher, command: getManagedCommand(scriptPath, event, true) }
+          : undefined
+      })()
     )
-    writeManagedScript(scriptPath, getManagedScript())
+    const runtimePath = process.platform === 'win32' ? this.getWindowsRuntimePath() : undefined
+    if (process.platform === 'win32') {
+      writeManagedScript(
+        getSharedManagedScriptPath('antigravity-hook-post.cjs'),
+        WINDOWS_ANTIGRAVITY_JSON_POST_SCRIPT
+      )
+    }
+    writeManagedScript(scriptPath, getManagedScript('local', runtimePath))
     if (process.platform === 'win32') {
       // Why: Antigravity wraps hook commands in cmd.exe. Keeping event env
       // setup inside event-specific .cmd files avoids nested hooks.json quotes.
@@ -165,6 +256,13 @@ export class AntigravityHookService {
         writeManagedScript(
           getWindowsWrapperScriptPath(event),
           getWindowsWrapperScript(event.eventName)
+        )
+      }
+      const preToolUseEvent = ANTIGRAVITY_EVENTS.find((event) => event.eventName === 'PreToolUse')
+      if (preToolUseEvent) {
+        writeManagedScript(
+          getWindowsWrapperScriptPath(preToolUseEvent, true),
+          getWindowsWrapperScript('PreToolUse', 'checkpoint')
         )
       }
     }
@@ -191,7 +289,14 @@ export class AntigravityHookService {
       buildInstalledConfig(
         config,
         (event) => getPosixManagedCommand(remoteScriptPath, event),
-        createAntigravityManagedCommandMatcher()
+        createAntigravityManagedCommandMatcher(),
+        (() => {
+          const matcher = getAgentCheckpointToolMatcher('antigravity')
+          const event = ANTIGRAVITY_EVENTS.find((item) => item.eventName === 'PreToolUse')
+          return matcher && event
+            ? { matcher, command: getPosixManagedCommand(remoteScriptPath, event, true) }
+            : undefined
+        })()
       )
       await writeManagedScriptRemote(sftp, remoteScriptPath, getManagedScript('posix'))
       await writeHooksJsonRemote(sftp, remoteConfigPath, config)
@@ -231,6 +336,14 @@ export class AntigravityHookService {
     writeHooksJson(configPath, config)
     return this.getStatus()
   }
+}
+
+function hookDefinitions(value: unknown): HookDefinition[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is HookDefinition =>
+        typeof item === 'object' && item !== null && !Array.isArray(item)
+      )
+    : []
 }
 
 export const antigravityHookService = new AntigravityHookService()

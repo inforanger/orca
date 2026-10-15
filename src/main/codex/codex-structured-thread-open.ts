@@ -10,15 +10,13 @@ import {
   type CodexAppServerConnection
 } from './codex-app-server-connection'
 import type { CodexStructuredPermissionPolicy } from './codex-structured-permission-policy'
-import { readCodexThreadId, readCodexThreadPath } from './codex-structured-thread-facts'
+import { readCodexThreadId } from './codex-structured-thread-facts'
 
 export type CodexOpenedThread = {
   threadId: string
   /** The unsaved thread this new one was started in place of. */
   supersededThreadId?: string
   thread?: Record<string, unknown>
-  /** Rollout file Codex named, when it named one. */
-  historyPath: string | null
   historyMode?: 'legacy' | 'paginated'
   model?: string
   effort?: string
@@ -28,41 +26,6 @@ export type CodexOpenedThread = {
 
 function nonEmptyString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null
-}
-
-const resumeMetadataUnsupported = new WeakSet<object>()
-
-function isExcludeTurnsUnsupported(error: unknown): boolean {
-  return (
-    isCodexAppServerRequestError(error) &&
-    error.code === -32602 &&
-    /(?:unknown|unexpected|unsupported|unrecognized).{0,80}excludeTurns|excludeTurns.{0,80}(?:unknown|unexpected|unsupported|unrecognized)/i.test(
-      error.message
-    )
-  )
-}
-
-async function resumeCodexThread(
-  connection: Pick<CodexAppServerConnection, 'request'>,
-  params: Record<string, unknown>,
-  timeoutMs: number | undefined
-): Promise<unknown> {
-  if (resumeMetadataUnsupported.has(connection)) {
-    return connection.request('thread/resume', params, { timeoutMs })
-  }
-  try {
-    return await connection.request(
-      'thread/resume',
-      { ...params, excludeTurns: true },
-      { timeoutMs }
-    )
-  } catch (error) {
-    if (!isExcludeTurnsUnsupported(error)) {
-      throw error
-    }
-    resumeMetadataUnsupported.add(connection)
-    return connection.request('thread/resume', params, { timeoutMs })
-  }
 }
 
 /**
@@ -93,11 +56,17 @@ export async function openCodexThread(
     /** Why: Codex renders a thread's base instructions for its opening model; a first turn on
      *  another model reads as a mid-conversation switch and injects a second full prompt. */
     model?: string
+    /** Config overrides for this thread, on start and resume alike. */
+    threadConfig?: Record<string, unknown>
   },
   timeoutMs: number | undefined
 ): Promise<CodexOpenedThread> {
   const resumeThreadId = launch.resumeThreadId
-  const threadSettings = { cwd: launch.cwd, ...launch.permissionPolicy }
+  const threadSettings = {
+    cwd: launch.cwd,
+    ...launch.permissionPolicy,
+    ...(launch.threadConfig ? { config: launch.threadConfig } : {})
+  }
   const startThread = (): Promise<unknown> =>
     connection.request(
       'thread/start',
@@ -116,7 +85,11 @@ export async function openCodexThread(
       ...(launch.resumePath ? { path: launch.resumePath } : {})
     }
     try {
-      opened = await resumeCodexThread(connection, resumeParams, timeoutMs)
+      opened = await connection.request(
+        'thread/resume',
+        { ...resumeParams, excludeTurns: true },
+        { timeoutMs }
+      )
     } catch (error) {
       if (!launch.supersedeIfUnsaved || !isCodexNoRolloutError(error, resumeThreadId)) {
         throw error
@@ -145,7 +118,6 @@ export async function openCodexThread(
     threadId,
     ...(supersededThreadId === undefined ? {} : { supersededThreadId }),
     thread,
-    historyPath: readCodexThreadPath(opened),
     ...(thread.historyMode === 'legacy' || thread.historyMode === 'paginated'
       ? { historyMode: thread.historyMode }
       : {}),

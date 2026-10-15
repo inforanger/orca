@@ -8,6 +8,7 @@ import { readCursorAuthSession } from '../cursor-auth'
 import { fetchZcodeRateLimits } from '../zcode-usage-fetcher'
 import { fetchAntigravityRateLimits } from '../antigravity-usage-fetcher'
 import { antigravityUsageDisabledSnapshot } from '../antigravity-usage-snapshot'
+import { ZCODE_PLAN_SITE_BASE_URLS } from '../../../shared/zcode-plan-sites'
 import { fetchMiniMaxRateLimits } from '../minimax/minimax-fetcher'
 import { createHash } from 'node:crypto'
 import { fetchOpenCodeGoUsage } from '../opencode-go-usage-source-selection'
@@ -36,6 +37,8 @@ export type FetchAllCyclePrepared = {
   opencodeGeneration: number
   miniMaxConfigChanged: boolean
   miniMaxGeneration: number
+  zcodeConfigChanged: boolean
+  zcodeGeneration: number
   claudeFetchGated: boolean
   results: [
     PromiseSettledResult<ProviderRateLimits>,
@@ -69,10 +72,12 @@ export abstract class RateLimitServiceFullCyclePreparation extends RateLimitServ
     this.rememberClaudeAuthSnapshot(claudeAuthPreparation, claudeGeneration, claudeTarget)
     const claudeProvenance = claudeAuthPreparation?.provenance ?? 'system'
     const codexTarget = this.codexFetchTarget
+    // Why: capture before the resolver await; a reset during it bumps the generation and this cycle's result is stale.
+    const codexGeneration = this.codexFetchGeneration
     const previousState = this.state
     // Why: a skipped Codex poll must not stop the other providers' cycle, so gate
     // only the Codex slot instead of returning early (#STA-4422).
-    const codexHome = this.resolveCodexHome(codexTarget)
+    const codexHome = await this.resolveCodexHome(codexTarget)
     const codexFetchGated = codexHome.skip
     const codexHomePath = codexHome.homePath
     const codexStateBeforeFetch =
@@ -80,11 +85,12 @@ export abstract class RateLimitServiceFullCyclePreparation extends RateLimitServ
     const codexProvenance = codexFetchGated
       ? null
       : this.getCodexProvenance(codexTarget, codexHomePath)
-    const codexGeneration = this.codexFetchGeneration
-    const openCodeGoConfig = this.openCodeGoConfigResolver?.()
-    const cookie = openCodeGoConfig?.sessionCookie ?? ''
-    const workspaceIdOverride = openCodeGoConfig?.workspaceIdOverride ?? ''
-    const openCodeGoApiKey = openCodeGoConfig?.apiKey ?? ''
+    const openCodeGoConfig = this.resolveOpenCodeGoConfig()
+    const cookie = openCodeGoConfig.sessionCookie
+    const workspaceIdOverride = openCodeGoConfig.workspaceIdOverride
+    const openCodeGoApiKey = openCodeGoConfig.apiKey
+    const openCodeGoApiKeyError = openCodeGoConfig.apiKeyError
+    const openCodeGoApiKeyReadSkipped = openCodeGoConfig.apiKeyReadSkipped
     const miniMaxConfigResult = this.resolveMiniMaxConfig()
     const miniMaxCookie = miniMaxConfigResult.config.sessionCookie
     const miniMaxGroupId = miniMaxConfigResult.config.groupId
@@ -101,7 +107,7 @@ export abstract class RateLimitServiceFullCyclePreparation extends RateLimitServ
     const apiKeyFingerprint = openCodeGoApiKey
       ? createHash('sha256').update(openCodeGoApiKey).digest('hex')
       : ''
-    const currentConfigHash = `${cookie}|${workspaceIdOverride}|${apiKeyFingerprint}`
+    const currentConfigHash = `${cookie}|${workspaceIdOverride}|${apiKeyFingerprint}|${openCodeGoApiKeyError ?? ''}`
     const opencodeConfigChanged = currentConfigHash !== this.lastOpencodeConfigHash
     if (opencodeConfigChanged) {
       this.lastOpencodeConfigHash = currentConfigHash
@@ -118,6 +124,25 @@ export abstract class RateLimitServiceFullCyclePreparation extends RateLimitServ
     const miniMaxGeneration = this.minimaxFetchGeneration
 
     const antigravityUsageEnabled = this.antigravityUsageEnabledResolver?.() ?? true
+
+    const zcodePlanConfigResult = this.resolveZcodePlanConfig()
+    const zcodePlanApiKey = zcodePlanConfigResult.config.apiKey
+    // Why digest, not the key: this string only has to change when the credential does.
+    const currentZcodeConfigHash = zcodePlanApiKey
+      ? `${zcodePlanConfigResult.config.site}|${createHash('sha256').update(zcodePlanApiKey).digest('hex')}`
+      : (zcodePlanConfigResult.error ?? '')
+    const zcodeConfigChanged = currentZcodeConfigHash !== this.lastZcodeConfigHash
+    if (zcodeConfigChanged) {
+      this.lastZcodeConfigHash = currentZcodeConfigHash
+      this.zcodeFetchGeneration += 1
+    }
+    const zcodeGeneration = this.zcodeFetchGeneration
+    const zcodePlanCredential = zcodePlanApiKey
+      ? {
+          apiKey: zcodePlanApiKey,
+          baseUrl: ZCODE_PLAN_SITE_BASE_URLS[zcodePlanConfigResult.config.site]
+        }
+      : null
 
     // Mark all providers fetching while keeping previous data visible (Codex is cleared separately on account change).
     this.updateState({
@@ -140,7 +165,9 @@ export abstract class RateLimitServiceFullCyclePreparation extends RateLimitServ
         : this.withFetchingStatus(previousState.minimax, 'minimax'),
       grok: this.withFetchingStatus(previousState.grok, 'grok'),
       cursor: this.withFetchingStatus(previousState.cursor, 'cursor'),
-      zcode: this.withFetchingStatus(previousState.zcode, 'zcode')
+      zcode: zcodeConfigChanged
+        ? this.withFetchingStatus(null, 'zcode')
+        : this.withFetchingStatus(previousState.zcode, 'zcode')
     })
 
     // Why its own promise: the keychain read and the desktop state.vscdb read
@@ -155,7 +182,11 @@ export abstract class RateLimitServiceFullCyclePreparation extends RateLimitServ
         (reason) => ({ status: 'rejected', reason }) as const
       )
 
-    const zcodeResultPromise = fetchZcodeRateLimits({ signal }).then(
+    const zcodeResultPromise = (
+      zcodePlanConfigResult.error
+        ? Promise.resolve(this.getZcodePlanCredentialError(zcodePlanConfigResult.error))
+        : fetchZcodeRateLimits({ signal, planCredential: zcodePlanCredential })
+    ).then(
       (value) => ({ status: 'fulfilled', value }) as const,
       (reason) => ({ status: 'rejected', reason }) as const
     )
@@ -200,6 +231,7 @@ export abstract class RateLimitServiceFullCyclePreparation extends RateLimitServ
           : (missingWslCodexHome ??
             fetchCodexRateLimits({
               codexHomePath,
+              networkProxySettings: this.networkProxySettingsResolver?.(),
               signal
             })),
         fetchGeminiRateLimits(geminiCliOAuthEnabled),
@@ -208,7 +240,15 @@ export abstract class RateLimitServiceFullCyclePreparation extends RateLimitServ
           // Why here: the key can also come from the environment or OpenCode's
           // own store, so presence is only known once the fetch resolves it.
           onApiKeyResolved: (resolution) => {
-            this.openCodeGoApiKeyConfigured = resolution.status === 'found'
+            // Why: a credential change mid-fetch bumps the generation; its stale presence must not win.
+            if (opencodeGeneration !== this.opencodeFetchGeneration) {
+              return
+            }
+            // An undecryptable or briefly unreadable saved key still counts, so the bar stays up.
+            this.openCodeGoApiKeyConfigured =
+              resolution.status === 'found' ||
+              openCodeGoApiKeyError !== null ||
+              openCodeGoApiKeyReadSkipped
           },
           cookie,
           workspaceIdOverride: workspaceIdOverride || undefined,
@@ -230,6 +270,18 @@ export abstract class RateLimitServiceFullCyclePreparation extends RateLimitServ
     if (signal.aborted) {
       return null
     }
+    // Why: the decrypt error only replaces a result with no usage and no diagnosis of its own; a real cookie error stays visible.
+    if (
+      openCodeGoApiKeyError &&
+      opencodeGoResult.status === 'fulfilled' &&
+      opencodeGoResult.value.status === 'unavailable'
+    ) {
+      opencodeGoResult.value = {
+        ...opencodeGoResult.value,
+        error: openCodeGoApiKeyError,
+        status: 'error'
+      }
+    }
     return {
       claudeTarget,
       claudeGeneration,
@@ -245,6 +297,8 @@ export abstract class RateLimitServiceFullCyclePreparation extends RateLimitServ
       opencodeGeneration,
       miniMaxConfigChanged,
       miniMaxGeneration,
+      zcodeConfigChanged,
+      zcodeGeneration,
       claudeFetchGated,
       results: [
         claudeResult,

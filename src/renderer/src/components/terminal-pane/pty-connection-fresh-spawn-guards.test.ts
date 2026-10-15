@@ -130,14 +130,14 @@ function createDeps(overrides: Record<string, unknown> = {}) {
 }
 
 describe('connectPanePty', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules()
     vi.clearAllMocks()
     transportFactoryQueue = []
     createdTransportOptions = []
     storeSubscribers = []
     mockStoreState = createInitialStoreState(() => mockStoreState)
-    installTerminalTestGlobals()
+    await installTerminalTestGlobals()
   })
 
   afterEach(async () => {
@@ -235,6 +235,18 @@ describe('connectPanePty', () => {
       tabsByWorktree: { 'wt-1': [] }
     }
     expect(retain()).toBe(false)
+  })
+
+  it('carries the pane placement onto its transport', async () => {
+    const { connectPanePty } = await import('./pty-connection')
+    transportFactoryQueue.push(createMockTransport())
+    const placement = { kind: 'new-tab' } as const
+    const deps = createDeps({ tabId: 'tab-placement', placement })
+
+    connectPanePty(createPane(1) as never, createManager(1) as never, deps as never)
+    await flushAsyncTicks()
+
+    expect(createdTransportOptions[0]).toMatchObject({ placement })
   })
 
   it('fresh-spawns normally when the pane worktree is not being deleted', async () => {
@@ -392,7 +404,6 @@ describe('connectPanePty', () => {
     expect(createdTransportOptions[0]).toMatchObject({
       worktreeId: FLOATING_TERMINAL_WORKTREE_ID,
       executionHostId: 'local',
-      connectionId: null,
       launchAgent: 'codex'
     })
     expect(createdTransportOptions[0]?.projectRuntime).toBeUndefined()
@@ -419,7 +430,8 @@ describe('connectPanePty', () => {
         url: 'https://github.com/acme/orca/pull/42',
         slug: { owner: 'acme', repo: 'orca', host: 'github.com' },
         number: 42
-      })
+      }),
+      expect.objectContaining({ tabId: 'tab-1' })
     )
   })
 

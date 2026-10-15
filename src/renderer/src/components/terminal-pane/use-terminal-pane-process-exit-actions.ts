@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect } from 'react'
 import { useAppStore } from '../../store'
-import { CODEX_ACCOUNT_RESTART_STARTUP } from '@/lib/codex-session-restart'
+import { buildCodexAccountRestartStartup } from '@/lib/codex-account-restart-startup'
 import { makePaneKey } from '../../../../shared/stable-pane-id'
 import { connectPanePty } from './pty-connection'
 import { bindPanePtyId } from '@/lib/pane-manager/mobile-fit-overrides'
@@ -17,18 +17,13 @@ export function useTerminalPaneProcessExitActions(controller: TerminalPaneCloseC
     clearExitedPanePtyLayoutBinding,
     clearRuntimePaneTitle,
     clearTabPtyId,
-    clearTerminalPaneUnread,
-    clearTerminalTabUnread,
-    clearWorktreeUnread,
     consumePendingCodexPaneRestart,
     cwd,
     dispatchNotification,
     executeClosePane,
     isActiveRef,
     isVisibleRef,
-    markTerminalPaneUnread,
-    markTerminalTabUnread,
-    markWorktreeUnread,
+    markTerminalBell,
     handlePaneProcessDied,
     managerRef,
     onAgentExitedRef,
@@ -59,15 +54,22 @@ export function useTerminalPaneProcessExitActions(controller: TerminalPaneCloseC
   } = controller
 
   const handleRestartCodexPane = useCallback(
-    (
-      paneId: number,
-      restartStartup: PtyConnectionDeps['startup'] = CODEX_ACCOUNT_RESTART_STARTUP
-    ) => {
+    (paneId: number, restartStartup?: PtyConnectionDeps['startup']) => {
       const manager = managerRef.current
       const pane = manager?.getPanes().find((candidate) => candidate.id === paneId)
       if (!manager || !pane) {
         return
       }
+      const startup =
+        restartStartup ??
+        buildCodexAccountRestartStartup({
+          tabId,
+          worktreeId,
+          leafId: pane.leafId,
+          shellOverride: useAppStore
+            .getState()
+            .tabsByWorktree[worktreeId]?.find((tab) => tab.id === tabId)?.shellOverride
+        })
       const transport = paneTransportsRef.current.get(paneId)
       const panePtyBinding = panePtyBindingsRef.current.get(paneId)
       const existingPtyId = transport?.getPtyId()
@@ -88,7 +90,7 @@ export function useTerminalPaneProcessExitActions(controller: TerminalPaneCloseC
         tabId,
         worktreeId,
         cwd,
-        startup: restartStartup,
+        startup,
         ...(replacesPtyId ? { replacesPtyId } : {}),
         mountFollowsTerminalPark: false,
         paneTransportsRef,
@@ -111,12 +113,7 @@ export function useTerminalPaneProcessExitActions(controller: TerminalPaneCloseC
         setRuntimePaneTitle,
         clearRuntimePaneTitle,
         updateTabPtyId,
-        markWorktreeUnread,
-        markTerminalTabUnread,
-        markTerminalPaneUnread,
-        clearWorktreeUnread,
-        clearTerminalTabUnread,
-        clearTerminalPaneUnread,
+        markTerminalBell,
         onShowSessionRestoredBanner: showRestoredSessionBanner,
         dispatchNotification,
         setCacheTimerStartedAt,
@@ -132,17 +129,12 @@ export function useTerminalPaneProcessExitActions(controller: TerminalPaneCloseC
       clearExitedPanePtyLayoutBinding,
       clearRuntimePaneTitle,
       clearTabPtyId,
-      clearTerminalPaneUnread,
-      clearTerminalTabUnread,
-      clearWorktreeUnread,
       cwd,
       dispatchNotification,
       handlePaneProcessDied,
       isActiveRef,
       isVisibleRef,
-      markWorktreeUnread,
-      markTerminalTabUnread,
-      markTerminalPaneUnread,
+      markTerminalBell,
       managerRef,
       onAgentExitedRef,
       onPtyErrorClearedRef,

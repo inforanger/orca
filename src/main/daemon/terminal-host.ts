@@ -1,20 +1,14 @@
 import type { Session } from './session'
-import {
-  SessionNotFoundError,
-  type SessionInfo,
-  type TakePendingOutputResult,
-  type TerminalSnapshot
-} from './types'
+import { SessionNotFoundError } from './types'
+import type { SessionInfo, TakePendingOutputResult, TerminalSnapshot } from './types'
 import type { CreateOrAttachResult } from './terminal-host-create-contract'
 import type { TerminalHostOptions } from './terminal-host-options'
 import { disposeTerminalHostSessions } from './terminal-host-disposal'
 import { getAliveTerminalHostSession } from './terminal-host-session-access'
 import { TerminalSessionTeardown } from './terminal-session-teardown'
 import { ClaimedAgentPtyOwnerRegistry } from '../../shared/claimed-agent-pty-owner'
-import {
-  createOrAttachClaimedAgentSession,
-  type InternalCreateOrAttachOptions
-} from './terminal-host-agent-session-claim'
+import { createOrAttachClaimedAgentSession } from './terminal-host-agent-session-claim'
+import type { InternalCreateOrAttachOptions } from './terminal-host-agent-session-claim'
 import { TerminalHostAgentSessionGenerations } from './terminal-host-agent-session-generations'
 import { resolveTerminalHostSessionCwd } from './terminal-host-session-cwd'
 import { TerminalHostTombstones } from './terminal-host-tombstones'
@@ -24,10 +18,8 @@ import { TerminalAttachCanceledError } from './daemon-errors'
 import { waitForTerminalAttachOperation } from './terminal-attach-cancellation'
 import { randomUUID } from 'node:crypto'
 import { pruneRetiredPtyIncarnations } from '../../shared/retired-pty-incarnations'
-import {
-  inspectTerminalHostProcess,
-  type TerminalHostProcessInspection
-} from './terminal-host-process-inspection'
+import { inspectTerminalHostProcess } from './terminal-host-process-inspection'
+import type { TerminalHostProcessInspection } from './terminal-host-process-inspection'
 import {
   confirmTerminalHostForegroundProcess,
   confirmTerminalHostShellForeground,
@@ -51,7 +43,7 @@ export class TerminalHost {
   private pendingCreations = new Map<string, Promise<void>>()
   private sessionTeardown = new TerminalSessionTeardown(this.sessions)
   private killedTombstones: TerminalHostTombstones
-  private spawnSubprocess: TerminalHostOptions['spawnSubprocess']
+  private readonly spawnOptions: Pick<TerminalHostOptions, 'spawnSubprocess' | 'spawnGate'>
   private onSessionReaped: TerminalHostOptions['onSessionReaped']
   private reportReadinessEvent: TerminalHostOptions['reportReadinessEvent']
   private onFinalCheckpoint: TerminalHostOptions['onFinalCheckpoint']
@@ -67,7 +59,7 @@ export class TerminalHost {
   >()
 
   constructor(opts: TerminalHostOptions) {
-    this.spawnSubprocess = opts.spawnSubprocess
+    this.spawnOptions = opts
     this.onSessionReaped = opts.onSessionReaped
     this.reportReadinessEvent = opts.reportReadinessEvent
     this.onFinalCheckpoint = opts.onFinalCheckpoint
@@ -115,7 +107,8 @@ export class TerminalHost {
             assertCreateAllowed: () => this.assertCreateOrAttachAllowed(options),
             sessionTeardown: this.sessionTeardown,
             killedTombstones: this.killedTombstones,
-            spawnSubprocess: this.spawnSubprocess,
+            spawnSubprocess: this.spawnOptions.spawnSubprocess,
+            spawnGate: this.spawnOptions.spawnGate,
             onDeadSessionRemoved: (sessionId) => this.agentSessionGenerations.forget(sessionId),
             onSessionCreated: (sessionId, generation, isAlive) =>
               this.agentSessionGenerations.remember(sessionId, generation, isAlive),
@@ -318,6 +311,15 @@ export class TerminalHost {
 
   listSessions(): SessionInfo[] {
     return listLiveTerminalHostSessions(this.sessions, this.agentSessionOwners)
+  }
+
+  hasLiveSessions(): boolean {
+    let hasLive = false
+    // Read every Session, even after a live one, to preserve the inventory's error order.
+    for (const session of this.sessions.values()) {
+      hasLive = session.isAlive || hasLive
+    }
+    return hasLive
   }
 
   dispose(): Promise<void> {

@@ -10,6 +10,7 @@ import type {
   GitPushTarget,
   GitWorktreeInfo,
   WorkspaceLinkedItem,
+  WorkspaceAttachment,
   WorkspaceStatus,
   Worktree
 } from './types'
@@ -110,6 +111,8 @@ export type CreateWorktreeArgs = {
    *  legitimately contains `/` while the worktree directory must not. */
   branchNameOverride?: string
   setupDecision?: SetupDecision
+  /** Per-create choice; omitted callers use the execution host's saved default. */
+  setupOnly?: boolean
   sparseCheckout?: CreateSparseCheckoutRequest
   linkedIssue?: number
   linkedPR?: number
@@ -122,6 +125,7 @@ export type CreateWorktreeArgs = {
   linkedAzureDevOpsPR?: number | null
   linkedGiteaPR?: number | null
   linkedWorkItem?: WorkspaceLinkedItem | null
+  linkedItems?: WorkspaceAttachment[]
   linkedTaskSourceContext?: TaskSourceContext | null
   pushTarget?: GitPushTarget
   workspaceStatus?: WorkspaceStatus
@@ -212,6 +216,7 @@ export type RemoveWorktreeResult = {
   /** The catalog this removal produced; additive, older hosts omit it. */
   catalogVersion?: WorktreeCatalogVersion
   preservedBranch?: PreservedWorktreeBranch
+  nestedPreservedBranches?: (PreservedWorktreeBranch & { worktreeId: string })[]
   /** Present only when a FAILED archive hook was explicitly waived for this removal (#19334). */
   archiveHookOverride?: ArchiveHookOverride
   /** The host accepted the removal and is still deleting the checkout. Sent only to clients that

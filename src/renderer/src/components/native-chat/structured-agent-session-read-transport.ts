@@ -9,7 +9,7 @@ import {
 import type { AgentSessionRefusalReference } from '../../../../shared/agent-session-wire-refusals'
 import { readAgentSessionErrorRefusal } from '../../../../shared/agent-session-write-failure'
 import { subscribeRuntimeHostContactRegained } from '@/runtime/runtime-host-contact-regained'
-import type { RuntimeClientTarget } from '@/runtime/runtime-rpc-client'
+import type { RuntimeClientTarget } from '../../../../shared/runtime-client-target'
 import { subscribeStructuredAgentSession } from '@/runtime/structured-agent-session-client'
 
 // A stream hands its failure over as the raw `{ code, message }` payload; `String()` of that is `[object Object]`.
@@ -78,10 +78,12 @@ function createReconnectScheduler(args: { shouldStop: () => boolean; reconnect: 
 }
 
 export function startStructuredAgentSessionReadTransport(args: {
-  applyEvent: (event: AgentSessionSubscribeEvent) => void
+  applyEvent: (event: AgentSessionSubscribeEvent, options?: { opensSubscription: true }) => void
   /** `message` is the failure's own text, for logs; `refusal` is what a surface words. */
   applyError: (message: string, refusal?: AgentSessionRefusalReference) => void
   getCursor: () => AgentJournalCursor | null
+  /** The live read is gone until a reconnect delivers: what the pane holds is stale from here. */
+  onContactLost: () => void
   onHistoryReadInvalidated: () => void
   hydrate?: (shouldStop: () => boolean) => Promise<void>
   sessionId: string
@@ -97,6 +99,8 @@ export function startStructuredAgentSessionReadTransport(args: {
   let unattachedSince: number | null = null
   let opening = false
   let openGeneration = 0
+  /** The open generation whose first frame has not arrived yet. */
+  let openingFrameGeneration = 0
   let stateGeneration = 0
   let unsubscribe = (): void => {}
   let shouldStopCoalescedEvent = (): boolean => true
@@ -116,6 +120,13 @@ export function startStructuredAgentSessionReadTransport(args: {
           reconnectScheduler.retryNow()
         )
       : () => {}
+  const loseContact = (): void => {
+    connected = false
+    // What already arrived is applied first: landing later, it would read as contact regained.
+    coalescer.flush()
+    args.onContactLost()
+    reconnectScheduler.schedule()
+  }
   const isCurrentOpenGeneration = (candidate: number): boolean =>
     !stopped && candidate === openGeneration
   const clearUnattachedReadGrace = (): void => {
@@ -179,8 +190,20 @@ export function startStructuredAgentSessionReadTransport(args: {
         return
       }
     } else if (event.type === 'end') {
-      connected = false
-      reconnectScheduler.schedule()
+      loseContact()
+    }
+    const opensSubscription = event.type !== 'end' && openingFrameGeneration === eventOpenGeneration
+    if (opensSubscription) {
+      openingFrameGeneration = 0
+    }
+    // A resumed subscription's first batch replaces state the client held while detached, so it is
+    // applied alone, never merged into a later batch that would read as "unchanged".
+    if (opensSubscription && event.type === 'batch') {
+      coalescer.flush()
+      if (isCurrentOpenGeneration(eventOpenGeneration)) {
+        args.applyEvent(event, { opensSubscription: true })
+      }
+      return
     }
     shouldStopCoalescedEvent = captureHistoryReadGuard()
     coalescer.push(event)
@@ -200,6 +223,7 @@ export function startStructuredAgentSessionReadTransport(args: {
       return
     }
     const currentOpenGeneration = ++openGeneration
+    openingFrameGeneration = currentOpenGeneration
     args.onHistoryReadInvalidated()
     unsubscribe()
     unsubscribe = (): void => {}
@@ -218,17 +242,15 @@ export function startStructuredAgentSessionReadTransport(args: {
             return
           }
           closedDuringOpen = true
-          connected = false
           reportReadFailure(error)
-          reconnectScheduler.schedule()
+          loseContact()
         },
         () => {
           if (!isCurrentOpenGeneration(currentOpenGeneration)) {
             return
           }
           closedDuringOpen = true
-          connected = false
-          reconnectScheduler.schedule()
+          loseContact()
         }
       )
       if (!isCurrentOpenGeneration(currentOpenGeneration) || closedDuringOpen) {
@@ -244,9 +266,8 @@ export function startStructuredAgentSessionReadTransport(args: {
       if (!isCurrentOpenGeneration(currentOpenGeneration)) {
         return
       }
-      connected = false
       reportReadFailure(error)
-      reconnectScheduler.schedule()
+      loseContact()
     } finally {
       if (currentOpenGeneration === openGeneration) {
         opening = false

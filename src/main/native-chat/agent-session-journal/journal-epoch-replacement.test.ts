@@ -19,19 +19,20 @@ import {
   openTestJournalHostDatabase,
   readTestJournalRows
 } from './journal-host-database-test-support'
+import { codexProviderHandle } from '../../../shared/agent-session-provider-handle-encoding'
 
 const IDENTITY: AgentSessionJournalIdentity = {
   sessionId: 'session-1',
   workspaceId: 'ws-1',
   hostId: 'host-1',
   agent: 'codex',
-  providerHandle: { kind: 'codex', threadId: 'thread-1' }
+  providerHandle: codexProviderHandle('thread-1')
 }
 
 const PEER: AgentSessionJournalIdentity = {
   ...IDENTITY,
   sessionId: 'session-peer',
-  providerHandle: { kind: 'codex', threadId: 'thread-peer' }
+  providerHandle: codexProviderHandle('thread-peer')
 }
 
 let root: string
@@ -67,7 +68,7 @@ function replace(input: {
     reason: 'legacy_import',
     fence: 1,
     items: input.items,
-    queuePause: { lifted: false, liveStop: null },
+    queuePause: { lifted: false, liveStop: null, reopened: false },
     now,
     mintEpoch: () => `epoch-${clock}`,
     onPublished: input.onPublished ?? (() => undefined)
@@ -95,7 +96,7 @@ describe('journal epoch replacement', () => {
     const published: JournalLoad[] = []
 
     replace({
-      items: [{ identity: item(1), body: { kind: 'status', text: 'republished' } }],
+      items: [{ identity: item(1), body: { kind: 'status', text: 'republished' }, ownerFence: 1 }],
       onPublished: (loaded) => published.push(loaded)
     })
 
@@ -111,7 +112,7 @@ describe('journal epoch replacement', () => {
       'a replace',
       (journal: AgentSessionJournal) =>
         journal.replaceEpochItems('legacy_import', 1, [
-          { identity: item(9), body: { kind: 'status', text: 'republished' } }
+          { identity: item(9), body: { kind: 'status', text: 'republished' }, ownerFence: 1 }
         ])
     ],
     ['a rollover', (journal: AgentSessionJournal) => journal.rollEpoch('handle_forked', 1)]

@@ -17,14 +17,16 @@ import { CURSOR_EVENTS, type CursorEvent } from '../cursor/hook-events'
 import { CommandCodeHookService } from '../command-code/hook-service'
 import { GeminiHookService } from '../gemini/hook-service'
 import { AntigravityHookService } from '../antigravity/hook-service'
+import { getAgentCheckpointToolMatcher } from '../agent-checkpoint/agent-checkpoint-tool-policy'
 import { AmpHookService } from '../amp/hook-service'
 import { ClaudeHookService, claudeHookService } from '../claude/hook-service'
-import { openClaudeHookService } from '../openclaude/hook-service'
 import { GrokHookService } from '../grok/hook-service'
 import { CopilotHookService } from '../copilot/hook-service'
 import { HermesHookService } from '../hermes/hook-service'
 import { DevinHookService } from '../devin/hook-service'
 import { KimiHookService } from '../kimi/hook-service'
+import { JcodeHookService } from '../jcode/hook-service'
+import { openClaudeHookService } from '../openclaude/hook-service'
 import {
   installRemoteManagedAgentHooks,
   REMOTE_MANAGED_HOOK_INSTALLER_AGENTS
@@ -185,6 +187,10 @@ describe('remote hook service installers', () => {
           install: (sftp: SFTPWrapper) => new DevinHookService().installRemote(sftp, '/home/dev')
         },
         {
+          path: '/home/dev/.orca/agent-hooks/jcode-hook.sh',
+          install: (sftp: SFTPWrapper) => new JcodeHookService().installRemote(sftp, '/home/dev')
+        },
+        {
           path: '/home/dev/.orca/agent-hooks/droid-hook.sh',
           install: (sftp: SFTPWrapper) => new DroidHookService().installRemote(sftp, '/home/dev')
         }
@@ -193,7 +199,7 @@ describe('remote hook service installers', () => {
       for (const { install, path } of installers) {
         const { sftp, fs } = createFakeSftp()
         const status = await install(sftp)
-        expect(status.state).toBe('installed')
+        expect(status.state, `${path}: ${status.detail ?? status.state}`).toBe('installed')
         const script = fs.files.get(path)
         if (path.includes('/.config/amp/plugins/')) {
           expect(script).toContain('/hook/amp')
@@ -321,7 +327,11 @@ describe('remote hook service installers', () => {
     })
 
     await new GeminiHookService().installRemote(gemini.sftp, '/home/dev')
-    await new AntigravityHookService().installRemote(antigravity.sftp, '/home/dev')
+    const antigravityStatus = await new AntigravityHookService().installRemote(
+      antigravity.sftp,
+      '/home/dev'
+    )
+    expect(antigravityStatus.state, antigravityStatus.detail ?? '').toBe('installed')
     await new AmpHookService().installRemote(amp.sftp, '/home/dev')
     await new CursorHookService().installRemote(cursor.sftp, '/home/dev')
     await new CommandCodeHookService().installRemote(commandCode.sftp, '/home/dev')
@@ -586,16 +596,26 @@ describe('remote hook service installers', () => {
       )}\n`
     )
 
-    await new AntigravityHookService().installRemote(sftp, '/home/dev')
+    const status = await new AntigravityHookService().installRemote(sftp, '/home/dev')
+    expect(status.state, status.detail ?? '').toBe('installed')
 
-    const config = JSON.parse(fs.files.get('/home/dev/.gemini/config/hooks.json')!) as {
-      'orca-status': Record<string, { hooks?: { command: string }[] }[]>
-    }
-    const preToolCommands = config['orca-status'].PreToolUse.flatMap((definition) =>
+    const config = JSON.parse(fs.files.get('/home/dev/.gemini/config/hooks.json')!)
+    const preToolDefinitions = config['orca-status'].PreToolUse
+    const preToolCommands = preToolDefinitions.flatMap((definition) =>
       (definition.hooks ?? []).map((hook) => hook.command)
     )
-    expect(preToolCommands).toHaveLength(1)
-    expect(preToolCommands[0]).toContain('/home/dev/.orca/agent-hooks/antigravity-hook.sh')
+    expect(preToolCommands).toHaveLength(2)
+    const statusDefinition = preToolDefinitions.find((definition) => definition.matcher === '*')
+    const checkpointDefinition = preToolDefinitions.find(
+      (definition) => definition.matcher === getAgentCheckpointToolMatcher('antigravity')
+    )
+    expect(statusDefinition?.hooks?.[0]?.command).toContain(
+      '/home/dev/.orca/agent-hooks/antigravity-hook.sh'
+    )
+    expect(checkpointDefinition?.hooks?.[0]?.command).toContain(
+      '/home/dev/.orca/agent-hooks/antigravity-hook.sh'
+    )
+    expect(checkpointDefinition?.hooks?.[0]?.command).toContain('ORCA_AGENT_HOOK_ROLE=checkpoint')
     expect(preToolCommands).not.toContain('/tmp/old/agent-hooks/antigravity-hook.sh')
     const postToolCommands = config['orca-status'].PostToolUse.flatMap((definition) =>
       (definition.hooks ?? []).map((hook) => hook.command)
@@ -711,7 +731,6 @@ describe('remote hook service installers', () => {
     expect(settings.hooks.TeammateIdle).toBeUndefined()
     expect(fs.files.get('/home/dev/.orca/agent-hooks/qoder-hook.sh')).toContain('/hook/qoder')
   })
-
   it('installs Droid and Copilot when running the aggregate remote installer (issue #7253)', async () => {
     const { sftp } = createFakeSftp()
     const results = await installRemoteManagedAgentHooks(sftp, '/home/dev', {

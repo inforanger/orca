@@ -37,8 +37,6 @@ function createContext(replay: string, attemptGeneration: number): ReattachPaylo
     attemptGeneration,
     prefetchedParkModelSnapshot: null,
     revealFollowsTerminalPark: false,
-    reconnectMayUseModel: false,
-    fetchSshMainModelReattachSnapshot: async () => null,
     shouldApplyStructuralPayload: true,
     coldRestoreStartup: undefined,
     reattachPayloadApplied: false,
@@ -47,7 +45,9 @@ function createContext(replay: string, attemptGeneration: number): ReattachPaylo
 }
 
 describe('reattach payload context', () => {
-  beforeEach(() => installTerminalTestGlobals())
+  beforeEach(async () => {
+    await installTerminalTestGlobals()
+  })
 
   afterEach(async () => restoreTerminalTestGlobals())
 

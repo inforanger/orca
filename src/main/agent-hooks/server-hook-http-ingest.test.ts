@@ -3,8 +3,12 @@ import { AgentHookServer, _internals } from './server'
 import { AGENT_STATUS_MAX_FIELD_LENGTH } from '../../shared/agent-status-types'
 import { makePaneKey } from '../../shared/stable-pane-id'
 import { buildBody, PANE, LEAF_2, LEAF_3 } from './server.test-fixtures'
+import type * as AgentCheckpointModule from '../agent-checkpoint/agent-checkpoint'
+type AgentCheckpoint = AgentCheckpointModule.AgentCheckpoint
+import { agentCheckpointReadiness } from '../agent-checkpoint/agent-checkpoint-readiness'
 
-const { getCohortAtEmitMock, trackMock } = vi.hoisted(() => ({
+const { checkpointLoadMock, getCohortAtEmitMock, trackMock } = vi.hoisted(() => ({
+  checkpointLoadMock: vi.fn(),
   getCohortAtEmitMock: vi.fn(),
   trackMock: vi.fn()
 }))
@@ -17,8 +21,20 @@ vi.mock('../telemetry/cohort-classifier', () => ({
   getCohortAtEmit: getCohortAtEmitMock
 }))
 
+vi.mock('../agent-checkpoint/agent-checkpoint', async (importOriginal) => {
+  const actual = await importOriginal<typeof AgentCheckpointModule>()
+  return { ...actual, loadAgentCheckpoint: checkpointLoadMock }
+})
+
 beforeEach(() => {
   _internals.resetCachesForTests()
+  agentCheckpointReadiness.clearAll()
+  checkpointLoadMock.mockReset()
+  checkpointLoadMock.mockResolvedValue({
+    canonicalPath: 'C:/canonical/rules/CHECKPOINT.md',
+    content: 'Canonical checkpoint text to inject unchanged.',
+    sha256: 'a'.repeat(64)
+  } satisfies AgentCheckpoint)
   trackMock.mockReset()
   getCohortAtEmitMock.mockReset()
   getCohortAtEmitMock.mockReturnValue({ nth_repo_added: 2 })
@@ -41,6 +57,54 @@ async function postClaudeHook(
     },
     body: JSON.stringify(buildBody(payload))
   })
+}
+
+async function postCheckpointHook(
+  server: AgentHookServer,
+  source: 'claude' | 'codex' | 'antigravity',
+  body: unknown
+): Promise<Response> {
+  const env = server.buildPtyEnv()
+  return fetch(`http://127.0.0.1:${env.ORCA_AGENT_HOOK_PORT}/hook/${source}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Orca-Agent-Hook-Token': env.ORCA_AGENT_HOOK_TOKEN
+    },
+    body: JSON.stringify(body)
+  })
+}
+
+function application(taskId: string, checkpoint: AgentCheckpoint) {
+  return {
+    checkpointSha256: checkpoint.sha256,
+    taskId,
+    taskSummary: `Apply CHECKPOINT.md to ${taskId}.`,
+    lessonsSearch: 'Reviewed the related checkpoint enforcement lessons and prior adapter evidence.',
+    why: ['The launch may omit it.', 'Provider lifecycle hooks differ.', 'Writes need task-specific review.'],
+    approachA: {
+      method: 'Add one startup reminder.',
+      workload: 'Small',
+      remainingProblem: 'Resume and child sessions are not covered.'
+    },
+    approachB: {
+      method: 'Use lifecycle context and exact supported mutation hooks.',
+      workload: 'Three provider adapters.',
+      solvedProblem: 'Supported file writes wait for this session application.',
+      feasible: true,
+      infeasibleReason: ''
+    },
+    userRequestedApproachA: false,
+    selectedApproach: 'B' as const,
+    selectionReason: 'This extends the authenticated hook route and keeps provider permission policy.',
+    rootCause: 'The previous listener returned status-only responses.',
+    resolution: 'Return canonical text and provider-specific mutation decisions.',
+    verification: 'Exercise actual loopback HTTP responses and readiness.',
+    reuseCheck: 'Reuse the current hook listener and CLI application RPC.',
+    architectureCheck: 'Keep one canonical source and shared session-state owner.',
+    errorPatternReview: 'Test missing and changed source before allowing writes.',
+    shortcutReview: 'Do not inspect arbitrary shell command text with a whitelist.'
+  }
 }
 
 describe('AgentHookServer listener replay', () => {
@@ -71,6 +135,172 @@ describe('AgentHookServer listener replay', () => {
           prompt: 'raw JSON'
         })
       ])
+    } finally {
+      server.stop()
+    }
+  })
+
+  it('returns client context and supported-tool decisions through the authenticated listener', async () => {
+    const server = new AgentHookServer()
+    await server.start({ env: 'production' })
+    const checkpoint = {
+      canonicalPath: 'C:/canonical/rules/CHECKPOINT.md',
+      content: 'Canonical checkpoint text to inject unchanged.',
+      sha256: 'a'.repeat(64)
+    }
+    try {
+      const scenarios = [
+        { source: 'claude', eventName: 'SessionStart', toolName: 'Write', token: 'claude-token' },
+        { source: 'codex', eventName: 'SessionStart', toolName: 'apply_patch', token: 'codex-token' },
+        { source: 'antigravity', eventName: 'PreInvocation', toolName: 'write_to_file', token: 'agy-token' }
+      ] as const
+
+      for (const scenario of scenarios) {
+        const processIdentity =
+          scenario.source === 'antigravity'
+            ? { platform: 'win32', pid: 1200, startTime: 'agy-initial-process' }
+            : undefined
+        const context = await postCheckpointHook(server, scenario.source, {
+          paneKey: PANE,
+          launchToken: scenario.token,
+          ...(processIdentity ? { agentProcess: processIdentity } : {}),
+          payload: {
+            hook_event_name: scenario.eventName,
+            session_id: `${scenario.source}-session`,
+            taskSummary: `Apply CHECKPOINT.md to ${scenario.token}.`
+          }
+        })
+        expect(context.status).toBe(200)
+        const contextText = await context.text()
+        expect(contextText).toContain(checkpoint.sha256)
+        expect(contextText).toContain('Bash/shell, command execution, MCP')
+
+        const genericStatus = await postCheckpointHook(server, scenario.source, {
+          paneKey: PANE,
+          launchToken: scenario.token,
+          payload: {
+            hook_event_name: 'PreToolUse',
+            tool_name: scenario.toolName,
+            toolCall: { name: scenario.toolName }
+          }
+        })
+        expect(genericStatus.status).toBe(204)
+
+        const blocked = await postCheckpointHook(server, scenario.source, {
+          paneKey: PANE,
+          launchToken: scenario.token,
+          hookRole: 'checkpoint',
+          payload: {
+            hook_event_name: 'PreToolUse',
+            tool_name: scenario.toolName,
+            toolCall: { name: scenario.toolName }
+          }
+        })
+        expect(blocked.status).toBe(200)
+        expect(await blocked.text()).toContain('"deny"')
+        expect(
+          agentCheckpointReadiness.apply(
+            { paneKey: PANE, launchToken: scenario.token },
+            application(scenario.token, checkpoint),
+            checkpoint
+          )
+        ).toEqual({ accepted: true })
+
+        const genericStatusAfterApplication = await postCheckpointHook(server, scenario.source, {
+          paneKey: PANE,
+          launchToken: scenario.token,
+          payload: {
+            hook_event_name: 'PreToolUse',
+            tool_name: scenario.toolName,
+            toolCall: { name: scenario.toolName }
+          }
+        })
+        expect(genericStatusAfterApplication.status).toBe(204)
+
+        const allowed = await postCheckpointHook(server, scenario.source, {
+          paneKey: PANE,
+          launchToken: scenario.token,
+          hookRole: 'checkpoint',
+          payload: {
+            hook_event_name: 'PreToolUse',
+            tool_name: scenario.toolName,
+            toolCall: { name: scenario.toolName }
+          }
+        })
+        if (scenario.source === 'antigravity') {
+          expect(allowed.status).toBe(200)
+          expect(await allowed.text()).toContain('"decision":"allow"')
+        } else {
+          expect(allowed.status).toBe(204)
+        }
+
+        const resumeEventName = scenario.source === 'antigravity' ? 'PreInvocation' : 'SessionStart'
+        const resumeContext = await postCheckpointHook(server, scenario.source, {
+          paneKey: PANE,
+          launchToken: scenario.token,
+          ...(scenario.source === 'antigravity'
+            ? {
+                agentProcess: {
+                  platform: 'win32',
+                  pid: 1201,
+                  startTime: 'agy-resumed-process'
+                }
+              }
+            : {}),
+          payload: {
+            hook_event_name: resumeEventName,
+            session_id: `${scenario.source}-session`,
+            taskSummary: `Apply CHECKPOINT.md to ${scenario.token}.`,
+            invocationNum: 0
+          }
+        })
+        expect(resumeContext.status).toBe(200)
+        expect(await resumeContext.text()).toContain(checkpoint.sha256)
+
+        const resumeDenied = await postCheckpointHook(server, scenario.source, {
+          paneKey: PANE,
+          launchToken: scenario.token,
+          hookRole: 'checkpoint',
+          payload: {
+            hook_event_name: 'PreToolUse',
+            tool_name: scenario.toolName,
+            toolCall: { name: scenario.toolName }
+          }
+        })
+        expect(resumeDenied.status).toBe(200)
+        expect(await resumeDenied.text()).toContain('"deny"')
+        expect(
+          agentCheckpointReadiness.apply(
+            { paneKey: PANE, launchToken: scenario.token },
+            application(scenario.token, checkpoint),
+            checkpoint
+          )
+        ).toEqual({ accepted: true })
+
+        const resumeAllowed = await postCheckpointHook(server, scenario.source, {
+          paneKey: PANE,
+          launchToken: scenario.token,
+          hookRole: 'checkpoint',
+          payload: {
+            hook_event_name: 'PreToolUse',
+            tool_name: scenario.toolName,
+            toolCall: { name: scenario.toolName }
+          }
+        })
+        if (scenario.source === 'antigravity') {
+          expect(resumeAllowed.status).toBe(200)
+          expect(await resumeAllowed.text()).toContain('"decision":"allow"')
+        } else {
+          expect(resumeAllowed.status).toBe(204)
+        }
+      }
+
+      const unsupported = await postCheckpointHook(server, 'codex', {
+        paneKey: PANE,
+        launchToken: 'codex-token',
+        payload: { hook_event_name: 'PreToolUse', tool_name: 'Bash' }
+      })
+      expect(unsupported.status).toBe(204)
     } finally {
       server.stop()
     }

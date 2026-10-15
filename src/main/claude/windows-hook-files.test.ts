@@ -9,7 +9,8 @@ import { ClaudeHookService } from './hook-service'
 import { getWindowsManagedLifecycleHook } from './hook-settings'
 import { getWindowsClaudeHookEntry, getWindowsClaudeHookPayloadPath } from './windows-hook-files'
 import { codebuddyHookService } from '../codebuddy/hook-service'
-import { qoderHookService } from '../qoder/hook-service'
+import { qoderHookService, qoderCnHookService } from '../qoder/hook-service'
+import { qwenCodeHookService } from '../qwen-code/hook-service'
 import { openClaudeHookService } from '../openclaude/hook-service'
 
 const { home } = vi.hoisted(() => ({ home: { path: '' } }))
@@ -44,9 +45,11 @@ describe('Windows Claude hook files', () => {
     expect(service.install().state).toBe('installed')
     expect(readFileSync(entry, 'utf8')).toBe(getWindowsClaudeHookEntry())
     const body = readFileSync(payload, 'utf8')
-    expect(body.indexOf('echo {}')).toBeLessThan(body.indexOf('curl.exe'))
+    expect(body).not.toContain('echo {}')
     expect(body).toContain('--connect-timeout 0.5 --max-time 1.5')
-    expect(body).toContain('--data-urlencode "payload@-" >nul 2>&1\r\nexit /b 0')
+    expect(body).toContain(
+      '--data-urlencode "payload@-"\r\nif errorlevel 1 echo {"systemMessage":"ORCA CHECKPOINT DELIVERY ERROR: the authenticated Orca hook endpoint did not respond; checkpoint text was not delivered and this fallback does not block mutations."}'
+    )
     expect(body).toContain('DEVIN_PROJECT_DIR')
   })
 
@@ -143,15 +146,16 @@ describe('Windows Claude hook files', () => {
   it('keeps compatible agents on their existing single-file scripts', async () => {
     for (const [name, compatible] of [
       ['qoder', qoderHookService],
+      ['qoder-cn', qoderCnHookService],
+      ['qwen-code', qwenCodeHookService],
       ['codebuddy', codebuddyHookService],
       ['openclaude', openClaudeHookService]
     ] as const) {
       expect(compatible.install().state).toBe('installed')
       await compatible.refreshManagedScripts()
       const path = join(home.path, '.orca', 'agent-hooks', `${name}-hook.cmd`)
-      expect(readFileSync(path, 'utf8')).toContain(
-        `/hook/${name === 'openclaude' ? 'claude' : name}`
-      )
+      const source = name === 'openclaude' ? 'claude' : name
+      expect(readFileSync(path, 'utf8')).toContain(`/hook/${source}`)
       expect(readFileSync(path, 'utf8')).not.toContain('claude-hook-impl.cmd')
       expect(existsSync(join(home.path, '.orca', 'agent-hooks', `${name}-hook-impl.cmd`))).toBe(
         false

@@ -13,10 +13,15 @@ import { inspectRuntimeTerminalProcess } from '@/runtime/runtime-terminal-inspec
 import { parseAppSshPtyId } from '../../../../../shared/ssh-pty-id'
 import { dispatchTerminalCommandFinishedEvent } from '@/hooks/terminal-command-finished-event'
 import { getExecutionHostIdForWorktree } from '@/lib/worktree-runtime-owner'
-import { resolveCommittedTitleAgentType } from '@/lib/pane-agent-evidence'
 import type { TuiAgent } from '../../../../../shared/tui-agent'
+import { titleAfterConfirmedShell } from '../../../../../shared/terminal-pane-title-reset'
 import { isTuiAgent, TUI_AGENT_CONFIG } from '../../../../../shared/tui-agent-config'
 
+import {
+  paneShouldAnswerOscColorQueries,
+  resolvePaneLaunchAgentCandidate,
+  type PaneLaunchAgentPaneSlice
+} from './pane-launch-agent-candidate'
 import type { ConnectPanePtySession } from './connect-pane-pty-session'
 
 /** Pane agent identity, foreground-agent sampling, and command lifecycle handling. */
@@ -28,22 +33,18 @@ export function installPaneAgentIdentity(session: ConnectPanePtySession): void {
     const entry = state.agentStatusByPaneKey[session.cacheKey]
     return entry?.state !== 'done' && Boolean(agentTypeToIconAgent(entry?.agentType))
   }
-  // Why: one ladder for both launch-agent signals; a second copy could drift.
+  // Why the shared module: the same ladder answers the 133;D guard, the visible-pane
+  // resampler, and the OSC color-reply skip, and it is the one piece of this installer
+  // that is a pure rule worth testing on its own.
+  const panePane = (): PaneLaunchAgentPaneSlice => ({
+    worktreeId: session.deps.worktreeId,
+    tabId: session.deps.tabId,
+    paneKey: session.cacheKey,
+    startup: session.paneStartup
+  })
   const resolveLaunchAgentCandidate = (
     state: ReturnType<typeof useAppStore.getState>
-  ): string | undefined => {
-    const tab = (state.tabsByWorktree[session.deps.worktreeId] ?? []).find(
-      (candidate) => candidate.id === session.deps.tabId
-    )
-    const registeredLaunchAgent =
-      state.agentLaunchConfigByPaneKey[session.cacheKey]?.identity.agentType
-    return (
-      tab?.launchAgent ??
-      session.paneStartup?.launchAgent ??
-      session.paneStartup?.initialAgentStatus?.agent ??
-      (isTuiAgent(registeredLaunchAgent) ? registeredLaunchAgent : undefined)
-    )
-  }
+  ): string | undefined => resolvePaneLaunchAgentCandidate(state, panePane())
   session.paneExpectsLaunchAgent = (state: ReturnType<typeof useAppStore.getState>): boolean =>
     Boolean(resolveLaunchAgentCandidate(state))
   // Why: the concrete TUI agent a fresh spawn is expected to launch, used to seed
@@ -53,13 +54,18 @@ export function installPaneAgentIdentity(session: ConnectPanePtySession): void {
     const candidate = resolveLaunchAgentCandidate(useAppStore.getState())
     return isTuiAgent(candidate) ? candidate : null
   }
+  // Why: jcode themes itself; answering its OSC color burst can land before its
+  // composer is ready and render the reply as pre-typed text (the main-side
+  // startup ingress already skips it, the renderer must skip the answer too).
+  session.shouldAnswerPaneOscColorQueries = (): boolean =>
+    paneShouldAnswerOscColorQueries(useAppStore.getState(), panePane())
   // Why: a launched/hook-known agent pane must confirm — not trust — a 133;D so a
   // full-screen agent's leaked nested-shell 133;D can't clear its tab identity,
   // even on a restore where no command-start read has recorded evidence yet.
   session.paneHasKnownAgentIdentity = (): boolean => {
     const state = useAppStore.getState()
     const registeredLaunchAgent =
-      state.agentLaunchConfigByPaneKey[session.cacheKey]?.identity.agentType
+      state.agentLaunchConfigByPaneKey[session.cacheKey]?.identity?.agentType
     return (
       Boolean(state.paneForegroundAgentByPaneKey[session.cacheKey]?.agent) ||
       session.paneHasLiveHookAgentIcon(state) ||
@@ -76,11 +82,13 @@ export function installPaneAgentIdentity(session: ConnectPanePtySession): void {
     const tab = (state.tabsByWorktree[session.deps.worktreeId] ?? []).find(
       (entry) => entry.id === session.deps.tabId
     )
-    const title = currentTitle ?? tab?.title
-    if (!title || resolveCommittedTitleAgentType(title) === null) {
+    const neutralTitle = titleAfterConfirmedShell(
+      currentTitle ?? tab?.title,
+      session.neutralTerminalTitle()
+    )
+    if (neutralTitle === null) {
       return
     }
-    const neutralTitle = session.neutralTerminalTitle()
     session.deps.setRuntimePaneTitle(session.deps.tabId, session.pane.id, neutralTitle)
     if (session.manager.getActivePane()?.id === session.pane.id) {
       session.deps.updateTabTitle(session.deps.tabId, neutralTitle)
@@ -102,7 +110,7 @@ export function installPaneAgentIdentity(session: ConnectPanePtySession): void {
    *  pane armed at 1 that reports exactly once more compares equal. It needs a foreign drop inside
    *  the confirm window; the relaunch case that would otherwise hit it is already discarded by
    *  onCommandStarted, and the cost is retiring a pane the process table just proved is a shell. */
-  const reconcileEndedProcessIfPaneQuiet = (armedAcceptedStatusSeq: number | undefined): void => {
+  session.reconcileEndedProcessIfPaneQuiet = (armedAcceptedStatusSeq: number | undefined): void => {
     const current = useAppStore.getState().agentStatusByPaneKey[session.cacheKey]
     if (current && current.acceptedStatusSeq !== armedAcceptedStatusSeq) {
       return
@@ -116,7 +124,7 @@ export function installPaneAgentIdentity(session: ConnectPanePtySession): void {
   session.visibleForegroundSamplePending = false
   session.visibleForegroundSampleSettled = false
   session.settleDeferredCommandFinishedStatusDrop = (
-    options: { confirmedShell?: boolean } = {}
+    options: { confirmedShell?: boolean; processExitConfirmed?: boolean } = {}
   ): void => {
     const dropStatus = session.deferredCommandFinishedStatusDrop
     const reconcile = session.deferredConfirmedShellReconcile
@@ -139,6 +147,10 @@ export function installPaneAgentIdentity(session: ConnectPanePtySession): void {
       session.deferredCommandFinishedStatusDrop = null
       if (!verifiable) {
         dropStatus()
+        // Why: only a process-table-confirmed exit proves the agent's main-side latches are dead.
+        if (options.processExitConfirmed) {
+          reconcile?.()
+        }
       }
     }
     void Promise.resolve(window.api?.agentStatus?.hasVerifiableAgentProcess?.(session.cacheKey))
@@ -176,11 +188,11 @@ export function installPaneAgentIdentity(session: ConnectPanePtySession): void {
     isTrackablePtyId: session.isForegroundTrackingAllowed,
     readForegroundProcess: (id, options) =>
       isRemotePtyId(id)
-        ? inspectRuntimeTerminalProcess(useAppStore.getState().settings, id, options)
+        ? inspectRuntimeTerminalProcess(id, options)
         : window.api.pty.getForegroundProcess(id),
     confirmForegroundProcess: (id, options) =>
       isRemotePtyId(id)
-        ? inspectRuntimeTerminalProcess(useAppStore.getState().settings, id, options)
+        ? inspectRuntimeTerminalProcess(id, options)
         : window.api.pty.confirmForegroundProcess(id),
     isRemotePtyId,
     getExpectedIncarnationId: () => session.remotePtyIncarnationId ?? null,
@@ -195,7 +207,10 @@ export function installPaneAgentIdentity(session: ConnectPanePtySession): void {
       // otherwise the tab resolver can repaint the exited agent from sleeping occupancy.
       const state = useAppStore.getState()
       const sleepingRecord = session.getSleepingRecordForPane(state)
-      if (sleepingRecord) {
+      const ptyId = session.transport.getPtyId()
+      // Why: a shell surfacing while Orca stops this PTY is that stop, not the agent exiting; a
+      // hibernation records the pane's resume before its kill, so this would delete it.
+      if (sleepingRecord && !(ptyId && state.suppressedPtyExitIds[ptyId])) {
         session.clearSleepingRecordProviderDuplicates(state, sleepingRecord)
       }
       session.clearStaleAgentTabTitleOnConfirmedShell()
@@ -273,7 +288,7 @@ export function installPaneAgentIdentity(session: ConnectPanePtySession): void {
       const armedAcceptedStatusSeq = entry?.acceptedStatusSeq
       session.deferredCommandFinishedStatusDrop = dropStatus
       session.deferredConfirmedShellReconcile = () =>
-        reconcileEndedProcessIfPaneQuiet(armedAcceptedStatusSeq)
+        session.reconcileEndedProcessIfPaneQuiet(armedAcceptedStatusSeq)
       return
     }
     session.deferredCommandFinishedStatusDrop = null
@@ -320,6 +335,7 @@ export function installPaneAgentIdentity(session: ConnectPanePtySession): void {
     // to an agent that already exited before confirmation ever ran.
     if (
       !foreground?.agent ||
+      !isTuiAgent(foreground.agent) ||
       foreground.routingTrusted !== true ||
       TUI_AGENT_CONFIG[foreground.agent].windowsShiftEnterEncoding !== 'csi-u'
     ) {

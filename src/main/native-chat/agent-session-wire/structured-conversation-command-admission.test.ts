@@ -6,6 +6,8 @@ import {
   type ConversationCommandAdmissionContext
 } from './structured-conversation-command-admission'
 import type { AgentSessionBackgroundTaskStops } from '../../../shared/agent-child-work-stop-targets'
+import type { AgentJournalSubmission } from '../../../shared/agent-session-journal-types'
+import { hasUnansweredStructuredAgentSessionDispatch } from '../../../shared/structured-agent-session-unanswered-dispatch'
 
 const TARGETED: AgentSessionBackgroundTaskStops = { supportsTaskStop: true, supportsStopAll: true }
 const UNTARGETED: AgentSessionBackgroundTaskStops = {
@@ -25,7 +27,14 @@ function contextWith(
   return {
     sessionId: 'session-1',
     fence: 1,
-    journal: { snapshot: () => ({ items: [] }), submissions: () => [] },
+    journal: {
+      snapshot: () => ({ items: [] }),
+      submissions: () => [],
+      runningTurn: () => null,
+      itemFence: () => undefined,
+      visitItems: () => undefined,
+      wroteBeforeOpen: () => false
+    },
     adapter
   }
 }
@@ -57,6 +66,8 @@ const SETTLED = child({
   settledAt: 300
 })
 const RECORD = { lease: {} } as unknown as AgentSessionRecord
+// oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: admission reads only the running turn's id and item id.
+const RUNNING_TURN = { turnId: 'turn-1', item: { itemId: 'turn-1' } } as never
 const STOP = 'Stop background tasks before using this command.'
 const WAIT = 'Wait for background tasks to finish before using this command.'
 
@@ -118,6 +129,7 @@ describe('conversationCommandBlocked background work', () => {
           }
         ]
       }) as unknown as ReturnType<typeof ctx.journal.snapshot>
+    ctx.journal.runningTurn = () => RUNNING_TURN
     expect(conversationCommandBlocked(ctx, RECORD, [child()])?.message).toBe(
       'Wait for the current turn to finish before using this command.'
     )
@@ -133,6 +145,7 @@ describe('conversationCommandBlocked for a command sent at rest (C6, B3)', () =>
     const ctx = contextWith(undefined)
     // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: the admission reads only each item's body.
     ctx.journal.snapshot = () => staleTurn as never
+    ctx.journal.runningTurn = () => RUNNING_TURN
     expect(conversationCommandBlocked(ctx, RECORD, [], 'at-rest')).toBeNull()
     expect(conversationCommandBlocked(ctx, RECORD, [])).toMatchObject({
       details: { reason: 'turnActive' },
@@ -164,7 +177,7 @@ describe('conversationCommandBlocked for a command sent at rest (C6, B3)', () =>
     expect(conversationCommandBlocked(contextWith(undefined), record, [])).toBeNull()
   })
 
-  it('refuses on a committed clear', () => {
+  it('does not permanently refuse an old-build clear source', () => {
     // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: the admission reads only the lease and the command record.
     const record = {
       lease: {},
@@ -175,10 +188,7 @@ describe('conversationCommandBlocked for a command sent at rest (C6, B3)', () =>
         replacementSessionId: 'clear-replacement'
       }
     } as unknown as AgentSessionRecord
-    expect(conversationCommandBlocked(contextWith(undefined), record, [])).toMatchObject({
-      code: 'agent_session_operation_invalid',
-      details: { reason: 'conversationCleared' }
-    })
+    expect(conversationCommandBlocked(contextWith(undefined), record, [])).toBeNull()
   })
 
   it('at handover, lets the command itself and messages queued behind it wait', () => {
@@ -190,5 +200,68 @@ describe('conversationCommandBlocked for a command sent at rest (C6, B3)', () =>
     ] as never
     ctx.journal.submissions = () => queued
     expect(conversationCommandBlocked(ctx, RECORD, [], 'handover')).toBeNull()
+  })
+})
+
+describe('conversationCommandBlocked on unsettled messages', () => {
+  // One send per state the Working indicator and admission could read differently.
+  const SENDS: Record<string, Partial<AgentJournalSubmission>> = {
+    queued: { dispatchState: 'pending', handoverRecorded: true },
+    handedOver: { dispatchState: 'pending', handoverRecorded: true, handedOverAt: 5 },
+    handedOverByEarlierChild: {
+      dispatchState: 'pending',
+      handoverRecorded: true,
+      handedOverAt: 5,
+      fence: 0
+    },
+    liveUnknown: { dispatchState: 'unknown' },
+    recoveredUnknown: { dispatchState: 'unknown', recovered: true },
+    restartedUnknown: { dispatchState: 'unknown', reason: 'host_restarted_before_acknowledgement' },
+    accepted: { dispatchState: 'accepted' },
+    rejected: { dispatchState: 'rejected' }
+  }
+
+  function admissionOver(send: string, admission?: 'at-rest' | 'handover') {
+    const ctx = contextWith(undefined)
+    const submissions: AgentJournalSubmission[] = [
+      {
+        clientMessageId: send,
+        fence: 1,
+        payloadFingerprint: 'fingerprint',
+        dispatchState: 'pending',
+        providerItemId: null,
+        reason: null,
+        submittedAt: 1,
+        resolvedAt: null,
+        ...SENDS[send]
+      }
+    ]
+    ctx.journal.submissions = () => submissions
+    const refusal = conversationCommandBlocked(ctx, RECORD, [], admission)
+    return {
+      blocked: refusal?.details && 'reason' in refusal.details ? refusal.details.reason : null,
+      working: hasUnansweredStructuredAgentSessionDispatch(submissions, ctx.fence)
+    }
+  }
+
+  it.each(Object.keys(SENDS))(
+    'refuses on %s exactly when the chat shows the agent working',
+    (send) => {
+      const { blocked, working } = admissionOver(send)
+      expect(blocked).toBe(working ? 'messagesUnsettled' : null)
+      expect(admissionOver(send, 'at-rest').blocked).toBe(blocked)
+    }
+  )
+
+  it('does not refuse what the chat no longer shows as working', () => {
+    // An earlier child's hand-off and a restart's doubt: the chat reads idle, so nothing refuses.
+    expect(admissionOver('handedOverByEarlierChild').blocked).toBeNull()
+    expect(admissionOver('restartedUnknown').blocked).toBeNull()
+  })
+
+  it('at handover, a queued message is one behind the command; a handed-over one still refuses', () => {
+    expect(admissionOver('queued', 'handover').blocked).toBeNull()
+    expect(admissionOver('handedOver', 'handover').blocked).toBe('messagesUnsettled')
+    expect(admissionOver('liveUnknown', 'handover').blocked).toBe('messagesUnsettled')
   })
 })

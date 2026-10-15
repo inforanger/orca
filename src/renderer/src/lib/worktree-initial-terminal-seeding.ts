@@ -3,6 +3,8 @@ import type {
   WorktreeSetupLaunch
 } from '../../../shared/worktree/launch-types'
 import type { ExecutionHostId } from '../../../shared/execution-host'
+import type { FolderWorkspace } from '../../../shared/folder-workspace-types'
+import { folderWorkspaceKey } from '../../../shared/workspace-scope'
 import { shouldAutoCreateInitialTerminal } from '@/components/terminal/initial-terminal'
 import { isTerminalWorkspaceEmptiedOnPurpose } from '../../../shared/closed-terminal-tab-tombstones'
 import { createSequencedSetupAgentCommands } from '../../../shared/setup-agent-sequencing'
@@ -11,19 +13,12 @@ import { agentKindToTuiAgent } from '../../../shared/agent-kind'
 import { useAppStore } from '@/store'
 import { queueHookCommandsForFirstWorktreeTab } from '@/lib/hook-command-delayed-delivery'
 import { resolveWorkspaceTerminalHostAuthority } from '@/lib/workspace-terminal-host-authority'
-import { initialAgentTabViewModeProps } from './native-chat-initial-view-mode'
-import { getConnectionId } from '@/lib/connection-context'
-import { isNativeChatTranscriptLocalReadable } from '@/lib/native-chat-transcript-readability'
 import { seedNativeChatAppliedSessionOptions } from '@/components/native-chat/native-chat-session-option-cache'
 import type {
   InitialTerminalOptions,
   WorktreeActivationStore
 } from '@/lib/worktree-activation-store-contract'
-import {
-  draftViewModeProps,
-  resolveStartupLaunchDraftText,
-  type WorktreeStartupPayload
-} from '@/lib/worktree-startup-payload'
+import type { WorktreeStartupPayload } from '@/lib/worktree-startup-payload'
 import {
   queueSetupAndIssueCommands,
   type IssueCommandLaunch
@@ -72,6 +67,32 @@ export function reseedGatedEmptyWorkspace(
       ...(seedUserDefaultSurface ? { seedUserDefaultSurface: true } : {})
     }
   )
+}
+
+export function ensureFolderWorkspaceInitialTerminal(
+  folderWorkspace: FolderWorkspace,
+  startup?: WorktreeStartupPayload,
+  providesInitialSurface?: boolean,
+  seedUserDefaultSurface?: boolean
+): string | null {
+  if (providesInitialSurface === true && startup === undefined) {
+    return null
+  }
+  const state = useAppStore.getState()
+  const workspaceKey = folderWorkspaceKey(folderWorkspace.id)
+  const primaryTabId = ensureWorktreeHasInitialTerminal(
+    state,
+    workspaceKey,
+    startup,
+    undefined,
+    undefined,
+    undefined,
+    {
+      reseedEmptiedWorkspace: providesInitialSurface !== true,
+      ...(seedUserDefaultSurface ? { seedUserDefaultSurface: true } : {})
+    }
+  )
+  return primaryTabId
 }
 
 export function ensureWorktreeHasInitialTerminal(
@@ -231,7 +252,20 @@ export function ensureWorktreeHasInitialTerminal(
     !hasExplicitLaunchWork &&
     opts.activateCreatedTabs !== false
   ) {
-    const defaultChat = openDefaultAgentChatInEmptyWorkspace(worktreeId)
+    // A host's "no" to the chat seeds what this same call would have without the default chat.
+    const defaultChat = openDefaultAgentChatInEmptyWorkspace(
+      worktreeId,
+      () =>
+        ensureWorktreeHasInitialTerminal(
+          store,
+          worktreeId,
+          startup,
+          setup,
+          issueCommand,
+          defaultTabs,
+          { ...opts, seedUserDefaultSurface: false }
+        ) !== null
+    )
     if (defaultChat) {
       return defaultChat.primaryTabId
     }
@@ -246,36 +280,20 @@ export function ensureWorktreeHasInitialTerminal(
       : undefined)
   const terminalTab = store.createTab(worktreeId, undefined, undefined, {
     pendingActivationSpawn: true,
-    ...(launchAgent
-      ? {
-          launchAgent,
-          ...initialAgentTabViewModeProps(store.settings ?? null, {
-            agent: launchAgent,
-            // Why: argv-prefill launches carry the draft in `command` and set no
-            // draftPrompt, so gating on draftPrompt alone misses them entirely.
-            ...draftViewModeProps(resolveStartupLaunchDraftText(sequencedStartup)),
-            nativeChatTranscriptIsLocalReadable: isNativeChatTranscriptLocalReadable(
-              getConnectionId(worktreeId)
-            )
-          })
-        }
-      : {}),
-    ...(opts?.activateCreatedTabs === false ? { activate: false } : {})
+    ...(launchAgent ? { launchAgent } : {}),
+    ...(opts?.activateCreatedTabs === false ? { activate: false } : {}),
+    // Why: the initial pane begins in the requested agent session instead of an idle shell.
+    ...(sequencedStartup ? { pendingStartup: sequencedStartup } : {})
   })
   if (opts?.activateCreatedTabs !== false) {
     store.setActiveTab(terminalTab.id)
   }
-
-  // Why: queue the seeded startup on the initial pane so the terminal begins in the requested agent session instead of an idle shell.
-  if (sequencedStartup) {
-    if (launchAgent) {
-      seedNativeChatAppliedSessionOptions(
-        terminalTab.id,
-        launchAgent,
-        sequencedStartup.sessionOptions
-      )
-    }
-    store.queueTabStartupCommand(terminalTab.id, sequencedStartup)
+  if (sequencedStartup && launchAgent) {
+    seedNativeChatAppliedSessionOptions(
+      terminalTab.id,
+      launchAgent,
+      sequencedStartup.sessionOptions
+    )
   }
   queueSetupAndIssueCommands(
     store,

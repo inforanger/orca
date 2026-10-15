@@ -1,16 +1,24 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
-import { runProcess } from '../../src/shared/child-process/run-process'
+import { runProcess } from '@orca/process-host'
 import { PR_CHECK_JOBS } from './pr-code-change-scope.mjs'
 
 const workflow = parse(readFileSync('.github/workflows/pr.yml', 'utf8'))
 const gate = workflow.jobs.verify.steps.find((step) => step.name === 'Require successful checks')
 const variable = (job) => job.replaceAll('-', '_').toUpperCase()
+const requiredJobs = [
+  ...new Set([
+    'preflight',
+    ...PR_CHECK_JOBS.filter((job) => job !== 'static_analysis' && job !== 'typecheck').map((job) =>
+      job === 'orcad_browser' ? 'test' : job
+    )
+  ])
+]
 
 function requiredResults(shouldRun) {
   return Object.fromEntries(
-    PR_CHECK_JOBS.flatMap((job) => [
+    requiredJobs.flatMap((job) => [
       [variable(job), shouldRun ? 'success' : 'skipped'],
       [`${variable(job)}_SHOULD_RUN`, String(shouldRun)]
     ])
@@ -42,7 +50,7 @@ describe.skipIf(process.platform === 'win32')(
     })
 
     it('rejects every missing, failed or cancelled required result when reuse is unavailable', async () => {
-      for (const job of PR_CHECK_JOBS) {
+      for (const job of requiredJobs) {
         for (const result of ['', 'skipped', 'failure', 'cancelled']) {
           const verdict = await verify({ ...requiredResults(true), [variable(job)]: result })
           expect(verdict.code, `${job}: ${result}`).toBe(1)
@@ -57,7 +65,7 @@ describe.skipIf(process.platform === 'win32')(
     })
 
     it('rejects unexpected downstream execution when the proven plan requires skips', async () => {
-      for (const job of PR_CHECK_JOBS) {
+      for (const job of requiredJobs) {
         const verdict = await verify({ ...requiredResults(false), [variable(job)]: 'success' })
         expect(verdict.code, job).toBe(1)
       }

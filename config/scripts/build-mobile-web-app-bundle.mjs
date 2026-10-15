@@ -363,15 +363,12 @@ export function mobileWebAppBuildOptions(routes) {
  */
 export function entryStaticClosure(metafile, entryOutputPath) {
   const reached = new Set([entryOutputPath])
-  const queue = [entryOutputPath]
-  while (queue.length > 0) {
-    const current = queue.shift()
+  for (const current of reached) {
     for (const imported of metafile.outputs[current]?.imports ?? []) {
       if (imported.kind !== 'import-statement' || reached.has(imported.path)) {
         continue
       }
       reached.add(imported.path)
-      queue.push(imported.path)
     }
   }
   return reached
@@ -509,7 +506,9 @@ export async function mobileWebAppModuleClosure(entryModules, { absWorkingDir } 
     // Extensionless, so `resolveExtensions` picks the same file the bundle ships: a route with a
     // `.web.tsx` sibling resolves to that one, and naming the `.tsx` path explicitly would measure
     // the native switch no browser ever loads.
-    entryPoints: entryModules.map((entry) => entry.replace(/\.tsx?$/, '')),
+    entryPoints: entryModules.map((entry) =>
+      resolve(absWorkingDir ?? base.absWorkingDir, entry.replace(/\.tsx?$/, ''))
+    ),
     splitting: false,
     // `[dir]` too: `app/_layout` and `app/h/_layout` share a name.
     entryNames: '[dir]/[name]',
@@ -589,7 +588,8 @@ export function resolveMobileWebPageRoutes(routeKeys, declared = MOBILE_WEB_PAGE
     grants: [...route.grants],
     ...(route.optionalGrants === undefined || route.optionalGrants.length === 0
       ? {}
-      : { optionalGrants: [...route.optionalGrants] })
+      : { optionalGrants: [...route.optionalGrants] }),
+    ...(route.canOwnHostArea === true ? { canOwnHostArea: true } : {})
   }))
 }
 
@@ -621,7 +621,7 @@ export async function buildMobileWebAppBundle({
 
   // Root-absolute, unlike the Phase A bootstrap's bare relative src: this document is served at
   // every route depth (/h/<hostId>/tasks), where a relative href resolves against the route and
-  // 404s. A <base> tag would be the other fix, but the shell's CSP sets base-uri 'none'.
+  // 404s. A <base> tag would be the other fix, but the shell's CSP admits only an about: base.
   // type="module", because the entry is esm and reaches its routes through import(). Same-origin
   // module and chunk both load under the shell's script-src 'self'; the policy is unchanged.
   const html =

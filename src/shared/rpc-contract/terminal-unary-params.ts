@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { OptionalFiniteNumber, OptionalString, requiredString } from './rpc-param-primitives'
 import { isTuiAgent } from '../tui-agent-config'
+import { SpawnIntentParam } from './agent-session-params'
 import {
   canonicalizeWindowsShellOverride,
   isSupportedWindowsShellOverride,
@@ -105,6 +106,8 @@ export const TerminalSend = TerminalHandle.extend({
   interrupt: z.unknown().optional(),
   // Why: older hosts strip this optional intent and retain their direct-send behavior.
   agentPrompt: z.literal(true).optional(),
+  // Older hosts strip this and omit the proof; callers read their whole-write `accepted` verdict.
+  requireWriteSettlement: z.literal(true).optional(),
   // Why: waiting observes the same prompt receipt; it never authorizes a second write.
   waitSubmitMs: z.number().int().min(0).max(3_600_000).optional(),
   resolvedLaunchDraft: z
@@ -186,11 +189,13 @@ export const TerminalCreateParams = z.object({
   terminalColorQueryReplies: TerminalColorQueryReplyColorsParam.optional(),
   title: OptionalString,
   focus: z.unknown().optional(),
+  // Ignored here; the CLI still sends it for hosts before v1.4.211, which route on it.
   rendererBacked: z.unknown().optional(),
   activate: z.unknown().optional(),
   presentation: z.enum(['background', 'focused']).optional(),
   tabId: OptionalString,
   leafId: OptionalString,
+  spawnIntent: SpawnIntentParam.optional(),
   // Why refused at the boundary rather than at spawn: only the host knows the allowlist, and a
   // relay-side throw reaches the caller as an opaque spawn failure after the round trip.
   shell: z

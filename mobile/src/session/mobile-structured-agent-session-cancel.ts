@@ -1,7 +1,7 @@
 import type { AgentSessionCancelResult } from '../../../src/shared/agent-session-wire'
 import type { AgentJournalRenderItem } from '../../../src/shared/agent-session-journal-types'
 import type { StructuredAgentSessionState } from '../../../src/shared/structured-agent-session-reducer'
-import { activeStructuredAgentSessionTurnId } from '../../../src/shared/structured-agent-session-live-turn'
+import { runningStructuredAgentSessionTurnId } from '../../../src/shared/structured-agent-session-live-turn'
 import type { RpcClient } from '../transport/rpc-client'
 import {
   requestStructuredAgentSessionMutation,
@@ -30,6 +30,8 @@ export async function requestMobileStructuredAgentSessionCancel(args: {
   prompt?: PromptIdentity
   /** Whether the host answers a repeated Stop of a turn quietly; null until the status probe answers. */
   hostAnswersRepeatedStops: boolean | null
+  /** Whether the host takes a Stop naming no turn; null until the status probe answers. */
+  hostStopsConversation: boolean | null
   /** Stops still on their way, by what they stop; against a host that does not answer a repeat
    *  quietly, a press for the same one joins it here. */
   inFlight: Map<string, Promise<boolean>>
@@ -37,16 +39,17 @@ export async function requestMobileStructuredAgentSessionCancel(args: {
 }): Promise<boolean> {
   const { client, enabled, inFlight, onSendError, sessionId, stateRef } = args
   const current = stateRef.current
-  const turnId = activeStructuredAgentSessionTurnId(current.items)
-  if (!client || !sessionId || !enabled || current.fence === null || !turnId) {
+  const turnId = runningStructuredAgentSessionTurnId(current)
+  // Check the capability before fields enter the fingerprint.
+  const prompt = args.prompt && args.promptCancelSupported === true ? args.prompt : undefined
+  // Such a host stops whatever the chat has in flight, a send the agent has not echoed included;
+  // a card's Cancel names the turn that raised it, prompt identity sent or not.
+  const unnamed = args.hostStopsConversation === true && !args.prompt
+  if (!client || !sessionId || !enabled || current.fence === null || (!turnId && !unnamed)) {
     onSendError('Stop not sent')
     return false
   }
-  // Check the capability before fields enter the fingerprint.
-  const fields = {
-    turnId,
-    ...(args.prompt && args.promptCancelSupported === true ? { prompt: args.prompt } : {})
-  }
+  const fields = unnamed ? {} : { turnId, ...(prompt ? { prompt } : {}) }
   // Every press is its own Stop: a kept id would be answered from the last one and stop nothing.
   const fence = current.fence
   const stop = () => sendStop({ client, sessionId, fence, fields, onSendError })

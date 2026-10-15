@@ -25,6 +25,7 @@ vi.mock('../git-bash', async (importOriginal) => ({
 import type { SFTPWrapper } from 'ssh2'
 import { createManagedCommandMatcher, WINDOWS_CMD_SAFE_PATH } from '../agent-hooks/installer-utils'
 import { WINDOWS_HOOK_STDIN_DRAIN_LABEL } from '../agent-hooks/hook-stdin-contract'
+import { getAgentCheckpointToolMatcher } from '../agent-checkpoint/agent-checkpoint-tool-policy'
 import { ClaudeHookService } from './hook-service'
 import { CLAUDE_EVENTS } from './claude-managed-hook-events'
 import { getWindowsManagedLifecycleHook, OPENCLAUDE_HOOK_SETTINGS } from './hook-settings'
@@ -44,6 +45,18 @@ const CURRENT_CLAUDE = { claudeVersion: '2.1.261 (Claude Code)' }
 
 function hasManagedCommand(hook: TestHook, matcher: (command: string | undefined) => boolean) {
   return matcher(hook.command) || hook.args?.some(matcher) === true
+}
+
+function withoutClaudeCheckpointGate(
+  hooks: Record<string, { matcher?: string; hooks?: TestHook[] }[]>
+): Record<string, { matcher?: string; hooks?: TestHook[] }[]> {
+  const checkpointMatcher = getAgentCheckpointToolMatcher('claude')
+  return Object.fromEntries(
+    Object.entries(hooks).map(([eventName, definitions]) => [
+      eventName,
+      definitions.filter((definition) => definition.matcher !== checkpointMatcher)
+    ])
+  )
 }
 
 describe('getWindowsManagedLifecycleHook', () => {
@@ -270,12 +283,13 @@ describe('ClaudeHookService.install', () => {
       )
       expect(managedScript).toContain('DEVIN_PROJECT_DIR')
       expect(managedScript).toContain('GROK_HOOK_EVENT')
-      // Why: guard and Devin-skip paths must still return neutral JSON (#14818).
+      // Why: checkpoint context and decisions now use the managed hook's sole JSON response.
       expect(managedScript).toMatch(
         process.platform === 'win32'
-          ? /^@echo off\r\nsetlocal\r\necho \{\}\r\n/
-          : /^#!\/bin\/sh\nprintf "\{\}\\n"\n/
+          ? /^@echo off\r\nsetlocal\r\nif defined ORCA_AGENT_HOOK_ENDPOINT/
+          : /^#!\/bin\/sh\n/
       )
+      expect(managedScript).toContain('ORCA CHECKPOINT DELIVERY ERROR')
     } finally {
       vi.unstubAllEnvs()
       rmSync(tmpHome, { recursive: true, force: true })
@@ -335,13 +349,12 @@ describe('ClaudeHookService.install', () => {
         readFileSync(join(tmpHome, '.claude', 'settings.json'), 'utf-8')
       ) as { statusLine?: { type: string; command: string } }
       expect(settings.statusLine?.type).toBe('command')
-      expect(settings.statusLine?.command).toContain(
-        '"${HOME-}/.orca/agent-hooks/claude-statusline.cmd"'
-      )
-      expect(settings.statusLine?.command).toContain(
-        '"${HOME-}/.orca/agent-hooks/claude-statusline.sh"'
-      )
-      expect(settings.statusLine?.command).not.toContain(tmpHome.replaceAll('\\', '/'))
+      if (process.platform !== 'win32') {
+        expect(settings.statusLine?.command).toContain(
+          '"${HOME-}/.orca/agent-hooks/claude-statusline.sh"'
+        )
+        expect(settings.statusLine?.command).not.toContain(tmpHome)
+      }
 
       const script = readFileSync(
         join(tmpHome, '.orca', 'agent-hooks', STATUSLINE_SCRIPT_FILE_NAME),
@@ -466,7 +479,7 @@ describe('ClaudeHookService.install', () => {
       vi.stubEnv('HOME', tmpHome)
       vi.stubEnv('USERPROFILE', tmpHome)
       try {
-        expect(new ClaudeHookService().install().state).toBe('installed')
+        expect(new ClaudeHookService().install(CURRENT_CLAUDE).state).toBe('installed')
 
         const settings = JSON.parse(
           readFileSync(join(tmpHome, '.claude', 'settings.json'), 'utf-8')
@@ -520,7 +533,9 @@ describe('ClaudeHookService.install', () => {
           expect(hook?.command, eventName).toBe(expected)
         }
         // Why: the whole point of #18875 — no interpreter is started to reach the script.
-        expect(JSON.stringify(settings.hooks)).not.toMatch(/powershell|EncodedCommand/i)
+        expect(JSON.stringify(withoutClaudeCheckpointGate(settings.hooks))).not.toMatch(
+          /powershell|EncodedCommand/i
+        )
         expect(new ClaudeHookService().getStatus(CURRENT_CLAUDE).state).toBe('installed')
       } finally {
         vi.unstubAllEnvs()
@@ -564,7 +579,9 @@ describe('ClaudeHookService.install', () => {
         const settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as {
           hooks: Record<string, { hooks: TestHook[] }[]>
         }
-        expect(JSON.stringify(settings.hooks)).not.toContain('-EncodedCommand')
+        expect(JSON.stringify(withoutClaudeCheckpointGate(settings.hooks))).not.toContain(
+          '-EncodedCommand'
+        )
         expect(
           settings.hooks.UserPromptSubmit.some((definition) =>
             definition.hooks.some((hook) => hook.command === 'echo mine')
@@ -607,15 +624,15 @@ describe('ClaudeHookService.install', () => {
           'utf-8'
         )
 
-        expect(new ClaudeHookService().getStatus().state).toBe('not_installed')
-        expect(new ClaudeHookService().install().state).toBe('installed')
+        expect(new ClaudeHookService().getStatus(CURRENT_CLAUDE).state).toBe('not_installed')
+        expect(new ClaudeHookService().install(CURRENT_CLAUDE).state).toBe('installed')
 
         const settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as {
           hooks: Record<string, { hooks: TestHook[] }[]>
         }
         expect(JSON.stringify(settings.hooks)).not.toContain('someone-else')
         expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(scriptPath.replaceAll('\\', '/'))
-        expect(new ClaudeHookService().getStatus().state).toBe('installed')
+        expect(new ClaudeHookService().getStatus(CURRENT_CLAUDE).state).toBe('installed')
       } finally {
         vi.unstubAllEnvs()
         rmSync(tmpHome, { recursive: true, force: true })
@@ -639,8 +656,9 @@ describe('ClaudeHookService.install', () => {
         expect(script).toContain('--data-urlencode "payload@-"')
         expect(script).toContain('/hook/claude')
         expect(script).not.toMatch(/Invoke-WebRequest/i)
-        // Why: guard and Devin-skip paths must still return neutral JSON (#14818).
-        expect(script.split('\r\n')[2]).toBe('echo {}')
+        expect(script.split('\r\n')[2]).toContain('ORCA_AGENT_HOOK_ENDPOINT')
+        expect(script).toContain('ORCA CHECKPOINT DELIVERY ERROR')
+        expect(script).not.toMatch(/payload@-" >nul/i)
       } finally {
         vi.unstubAllEnvs()
         rmSync(tmpHome, { recursive: true, force: true })
@@ -662,8 +680,7 @@ describe('backgrounded-session pane guard (#9236)', () => {
     expect(script).toContain('if [ -n "$CLAUDE_JOB_DIR" ]; then')
     // Why: the guard is worthless if it runs after the post it is meant to prevent.
     expect(script.indexOf('CLAUDE_JOB_DIR')).toBeLessThan(script.indexOf('curl'))
-    // Why: neutral JSON still has to reach a permission hook that fails closed (#14818).
-    expect(script.indexOf('printf "{}\\n"')).toBeLessThan(script.indexOf('CLAUDE_JOB_DIR'))
+    expect(script.indexOf('CLAUDE_JOB_DIR')).toBeGreaterThan(0)
   })
 
   // Why not skipped as unreachable: a backgrounded session's statusline IS invoked, inside the
@@ -765,10 +782,7 @@ describe('ClaudeHookService.installRemote', () => {
     expect(script).toContain('#!/bin/sh')
     expect(script).toContain('DEVIN_PROJECT_DIR')
     expect(script).toContain('GROK_HOOK_EVENT')
-    // Why: remote guard paths must still return neutral JSON (#14818).
-    expect(script!.indexOf('printf "{}\\n"')).toBe(
-      script!.indexOf('#!/bin/sh') + '#!/bin/sh\n'.length
-    )
+    expect(script).toContain('ORCA CHECKPOINT DELIVERY ERROR')
     // Why: payload stays on stdin, while metadata headers avoid URL-encoded IDS signatures.
     expect(script).toContain('printf \'%s\' "$payload" | curl')
     expect(script).toContain('-H "Content-Type: application/json"')

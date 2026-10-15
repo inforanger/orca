@@ -1,6 +1,25 @@
 import { describe, expect, it, vi } from 'vitest'
+import type * as AgentCheckpointModule from '../../../../../agent-checkpoint/agent-checkpoint'
+import { agentCheckpointReadiness } from '../../../../../agent-checkpoint/agent-checkpoint-readiness'
+
+const { checkpoint } = vi.hoisted(() => ({
+  checkpoint: {
+    canonicalPath: 'C:/npmind/rules/CHECKPOINT.md',
+    content: 'Complete synthetic checkpoint source',
+    sha256: 'a'.repeat(64)
+  }
+}))
 
 vi.mock('../../../../orchestration/preamble', () => ({ buildDispatchPreamble: () => 'preamble' }))
+vi.mock('../../../../../agent-checkpoint/agent-checkpoint', async (importOriginal) => {
+  const actual = await importOriginal<typeof AgentCheckpointModule>()
+  return {
+    ...actual,
+    loadAgentCheckpoint: async () => checkpoint,
+    renderAgentCheckpointContext: (_checkpoint: unknown, task: { taskId: string }) =>
+      `CHECKPOINT ${task.taskId}: Complete synthetic checkpoint source`
+  }
+})
 vi.mock('./worker-topology', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   monitorWorkerSetup: () => {}
@@ -9,7 +28,15 @@ vi.mock('./worker-topology', async (importOriginal) => ({
 const { deliverAndSettleWorkerStartReadiness } = await import('./worker-start-readiness-settlement')
 
 function settle(delivered: 'accepted' | undefined) {
+  agentCheckpointReadiness.clearAll()
   const db = {
+    getDispatchContextById: () => ({
+      task_id: 't1',
+      status: 'pending',
+      assignee_orca_session_id: 'session-1',
+      process_incarnation: 'structured:incarnation-1',
+      assignee_pane_key: 'tab-worker:pane-1'
+    }),
     getWorkerDispatch: () => ({ state: 'starting' }),
     markWorkerStartUnknown: vi.fn(() => ({
       stage: 'turn_start_unobserved',
@@ -19,10 +46,10 @@ function settle(delivered: 'accepted' | undefined) {
   }
   const host = {
     deps: { store: { getRecord: () => ({ lease: { runtimeFence: 1 } }) } },
-    send: async () => ({
+    send: vi.fn(async (..._args: unknown[]) => ({
       ok: true,
       value: { clientMessageId: 'c1', submission: { dispatchState: 'pending', reason: null } }
-    }),
+    })),
     // undefined: the worker's agent was still starting when the wait ran out.
     waitForSendSettlement: async () =>
       delivered
@@ -39,7 +66,14 @@ function settle(delivered: 'accepted' | undefined) {
     task: { id: 't1', spec: 'do the thing' },
     dispatchId: 'd1',
     dispatchDepth: 0,
-    structuredSession: { host, identity: { sessionId: 's1' } },
+    structuredSession: {
+      host,
+      identity: {
+        sessionId: 'session-1',
+        paneKey: 'tab-worker:pane-1',
+        processIncarnation: 'structured:incarnation-1'
+      }
+    },
     terminalHandle: 'structured_worker_1',
     coordinatorHandle: 'term_c',
     devMode: undefined,
@@ -55,12 +89,12 @@ function settle(delivered: 'accepted' | undefined) {
   }
   // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: the fakes implement exactly the runtime, db and host members this settlement reaches.
   const receipt = deliverAndSettleWorkerStartReadiness(args as never)
-  return { db, receipt }
+  return { db, host, receipt }
 }
 
 describe('a structured worker whose agent outlasts the preamble wait', () => {
   it('parks as start-unknown instead of failing the start, and never names a screen to read', async () => {
-    const { db, receipt } = settle(undefined)
+    const { db, host, receipt } = settle(undefined)
 
     // Resolving, not throwing, is what keeps the worker's session: a throw tears it down.
     await expect(receipt).resolves.toMatchObject({
@@ -78,6 +112,12 @@ describe('a structured worker whose agent outlasts the preamble wait', () => {
       expect.anything()
     )
     expect(db.markWorkerDispatchReady).not.toHaveBeenCalled()
+    expect(JSON.stringify(host.send.mock.calls)).toContain(
+      'CHECKPOINT t1: Complete synthetic checkpoint source\\nCHECKPOINT enforcement is unsupported'
+    )
+    expect(JSON.stringify(host.send.mock.calls)).toContain(
+      'CHECKPOINT enforcement is unsupported for this structured/chat transport'
+    )
   })
 
   it('is ready once the agent took the preamble within the wait', async () => {

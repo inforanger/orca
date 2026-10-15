@@ -1,3 +1,4 @@
+import { ImeInput } from '@/lib/ime-text-field'
 import React from 'react'
 import { Check, LoaderCircle, Pencil, X } from 'lucide-react'
 import { toast } from 'sonner'
@@ -50,11 +51,13 @@ export function ChecksPanelActiveContent({
     aiActionDisabledReason,
     canTargetPRComments,
     checks,
+    checksError,
     checksLoading,
     claimedCommentResolutionRef,
     commentResolutionLaunchAcceptedRef,
     comments,
     commentsDisabledReason,
+    commentsError,
     commentsLoading,
     commentsSelectionClearRequest,
     conflictDetailsRefreshing,
@@ -152,7 +155,7 @@ export function ChecksPanelActiveContent({
         {/* Review title */}
         {editingTitle ? (
           <div className="flex items-center gap-1">
-            <input
+            <ImeInput
               ref={titleInputRef}
               className="flex-1 text-[12px] bg-background border border-border rounded px-2 py-1 text-foreground outline-none focus:ring-1 focus:ring-ring"
               value={titleDraft}
@@ -241,6 +244,7 @@ export function ChecksPanelActiveContent({
       {!(activeConflictReview && checks.length === 0 && !checksLoading) && (
         <ChecksList
           checks={checks}
+          checksError={checksError}
           checksLoading={checksLoading}
           checkDetailsContextKey={stateRequestKey}
           onLoadCheckDetails={handleLoadCheckDetails}
@@ -250,6 +254,7 @@ export function ChecksPanelActiveContent({
       )}
       <PRCommentsList
         comments={comments}
+        commentsError={commentsError}
         commentsLoading={commentsLoading}
         reviewKind={reviewShortLabel}
         commentsDisabled={!canTargetPRComments}

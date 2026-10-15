@@ -65,6 +65,16 @@ export function nodeGypRebuildInvocation(
   }
 }
 
+export function nodeGypRebuildTimeoutMs(
+  moduleName,
+  { platform = process.platform, arch = process.arch, ci = process.env.CI } = {}
+) {
+  // Cold headers and toolchain discovery consumed over four minutes on Windows ARM CI.
+  return moduleName === 'node-pty' && platform === 'win32' && arch === 'arm64' && ci === 'true'
+    ? 600_000
+    : 300_000
+}
+
 /** The binary the addon actually loads. */
 export function windowsProcessTreeAddonPath(packageDir = WINDOWS_PROCESS_TREE_PACKAGE_DIR) {
   return join(packageDir, 'build', 'Release', 'windows_process_tree.node')
@@ -109,7 +119,7 @@ const RELAY_LAUNCHER_EXPORT = 'spawnOutsideJob'
  * `.build` dir or cached artifact would ship and the relay would fall back to
  * WMI, which refuses a standard user.
  */
-export function windowsProcessTreeAddonHasRelayLauncher(addonPath) {
+export function windowsProcessTreeAddonHasBreakawayLauncher(addonPath) {
   return readFileSync(addonPath).includes(RELAY_LAUNCHER_EXPORT)
 }
 
@@ -120,7 +130,7 @@ export function windowsProcessTreeAddonHasRelayLauncher(addonPath) {
  * @param {'x64' | 'arm64'} arch
  * @returns {string | null}
  */
-export function relayWindowsProcessTreeAddonDefect(addonPath, arch) {
+export function windowsProcessTreeAddonDefect(addonPath, arch) {
   const state = inspectWindowsProcessTreeAddon(addonPath)
   if (state === 'missing') {
     return 'it is missing'
@@ -135,7 +145,7 @@ export function relayWindowsProcessTreeAddonDefect(addonPath, arch) {
   if (machine !== PE_MACHINE[arch]) {
     return `it is ${describePeMachine(machine)}, not ${arch} (0x${PE_MACHINE[arch].toString(16)})`
   }
-  if (!windowsProcessTreeAddonHasRelayLauncher(addonPath)) {
+  if (!windowsProcessTreeAddonHasBreakawayLauncher(addonPath)) {
     return `it does not export ${RELAY_LAUNCHER_EXPORT}, so it predates the relay launcher patch`
   }
   return null

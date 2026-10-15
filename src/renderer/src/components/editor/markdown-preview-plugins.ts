@@ -10,13 +10,17 @@ import remarkFrontmatter from 'remark-frontmatter'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import { remarkMarkdownDocLinks } from './markdown-doc-links'
+import {
+  GITHUB_CALLOUT_SANITIZE_ATTRIBUTE,
+  remarkGitHubCallouts
+} from '@/lib/remark-github-callouts'
 
 const markdownPreviewSanitizeSchema = {
   ...defaultSchema,
   tagNames: [...(defaultSchema.tagNames ?? []), 'details', 'summary', 'kbd', 'sub', 'sup', 'ins'],
   protocols: {
     ...defaultSchema.protocols,
-    // Why: keep file:// through sanitize so the click handler can authorize and open the target.
+    // Why: keep file:// through sanitize so the click handler can open the target.
     href: [...(defaultSchema.protocols?.href ?? []), 'file'],
     src: [...(defaultSchema.protocols?.src ?? []), 'file']
   },
@@ -24,6 +28,10 @@ const markdownPreviewSanitizeSchema = {
     ...defaultSchema.attributes,
     '*': [...(defaultSchema.attributes?.['*'] ?? []), 'id'],
     a: [...(defaultSchema.attributes?.a ?? []), 'href', 'title'],
+    blockquote: [
+      ...(defaultSchema.attributes?.blockquote ?? []),
+      GITHUB_CALLOUT_SANITIZE_ATTRIBUTE
+    ],
     code: [
       ...(defaultSchema.attributes?.code ?? []),
       ['className', /^language-[\w-]+$/, 'math-inline', 'math-display']
@@ -54,16 +62,21 @@ type MarkdownPluginList = NonNullable<ReactMarkdownOptions['remarkPlugins']>
 export const MARKDOWN_REMARK_PLUGINS: MarkdownPluginList = [
   remarkGfm,
   remarkCjkFriendly,
+  remarkGitHubCallouts,
   remarkBreaks,
   remarkFrontmatter,
   remarkMath,
   remarkMarkdownDocLinks
 ]
-// Why: sanitize raw HTML before KaTeX/highlight expand it.
+export const MARKDOWN_REHYPE_NORMALIZATION_PLUGINS: MarkdownPluginList = [
+  [rehypeSanitize, markdownPreviewSanitizeSchema],
+  rehypeSlug
+]
+export const MARKDOWN_REHYPE_EXPANSION_PLUGINS: MarkdownPluginList = [rehypeHighlight, rehypeKatex]
+
+// Sanitize raw HTML before math and syntax expansion.
 export const MARKDOWN_REHYPE_PLUGINS: MarkdownPluginList = [
   rehypeRaw,
-  [rehypeSanitize, markdownPreviewSanitizeSchema],
-  rehypeSlug,
-  rehypeHighlight,
-  rehypeKatex
+  ...MARKDOWN_REHYPE_NORMALIZATION_PLUGINS,
+  ...MARKDOWN_REHYPE_EXPANSION_PLUGINS
 ]

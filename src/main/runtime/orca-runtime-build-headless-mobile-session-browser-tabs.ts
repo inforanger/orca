@@ -1,5 +1,5 @@
 // @ts-nocheck -- mechanically split from OrcaRuntimeService; behavior is covered by AST equivalence and characterization tests.
-import { OrcaRuntimeWithPersistTerminalSurfaceRetirements } from './orca-runtime-persist-terminal-surface-retirements'
+import { OrcaRuntimeWithPersistTerminalSurfaceRetirements } from './session-tabs/terminal-surface-retirements'
 import type {
   RuntimeMobileSessionBrowserTab,
   RuntimeMobileSessionTabsResult,
@@ -11,8 +11,8 @@ import { getRuntimeBrowserPageRegistry } from './runtime-browser-page-registry'
 import { holdAgentSessionInventory } from './structured-agent-session-inventory-hold'
 import type { Tab } from '../../shared/tab-types'
 import {
+  captureTerminalCloseRequest,
   resolveTerminalCloseTarget,
-  terminalSurfaceCloseMutation,
   type PaneCloseResolution,
   type RendererTerminalClose,
   type TerminalSurfaceCloseOptions
@@ -25,8 +25,10 @@ import { retireTerminalSurfacesFromSnapshot } from './mobile-session-terminal-re
 import type { PtyControllerInventory } from './runtime-pty-controller-contract'
 import { FLOATING_TERMINAL_WORKTREE_ID } from '../../shared/constants'
 import { captureAcknowledgedTerminalTabRetirement } from './workspace-session-terminal-tab-retirement-identity'
+import { closeLeafOrTab } from '../persistence/terminal-topology/terminal-topology-commit'
+import { markAgentLaunchesClosedByUser } from '../agent-launch/agent-launch-pane-attachment'
 
-export class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRuntimeWithPersistTerminalSurfaceRetirements {
+export abstract class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRuntimeWithPersistTerminalSurfaceRetirements {
   // Why: headless serve backs browser panes with offscreen WebContents that live
   // only in the BrowserManager, never in a renderer graph. Without surfacing them
   // as session tabs, a session.tabs snapshot (e.g. on terminal open) prunes the
@@ -35,12 +37,19 @@ export class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRu
   protected buildHeadlessMobileSessionBrowserTabs(
     worktreeId: string
   ): RuntimeMobileSessionBrowserTab[] {
+    // Saved tabs whose page starts on first use are listed as running ones are.
     const serverTabs =
       this.offscreenBrowserBackend && this.agentBrowserBridge?.tabList
-        ? this.agentBrowserBridge.tabList(worktreeId).tabs
+        ? [
+            ...this.agentBrowserBridge.tabList(worktreeId).tabs,
+            ...this.serveBrowserTabs.listUnstarted(worktreeId)
+          ]
         : []
     const publishedServerTabs = serverTabs.map((tab) => {
-      const persistedProps = this.getPersistedUnifiedSessionTabProps(worktreeId, tab.browserPageId)
+      const persistedProps = this.getPersistedUnifiedSessionTabProps(
+        worktreeId,
+        this.serveBrowserTabs.unifiedTabId(worktreeId, tab.browserPageId)
+      )
       return {
         type: 'browser' as const,
         // Why: an offscreen page has no separate workspace identity, so the page id
@@ -92,9 +101,9 @@ export class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRu
   }
 
   protected captureTerminalTabRetirement(worktreeId: string, tabId: string) {
-    const originalHostId = this.getWorkspaceSessionHostIdForWorktree(worktreeId)
+    const originalHostId = this.getWorkspaceSessionHostIdForTab(worktreeId, tabId)
     return captureAcknowledgedTerminalTabRetirement(worktreeId, tabId, () => {
-      const resolvedHostId = this.getWorkspaceSessionHostIdForWorktree(worktreeId)
+      const resolvedHostId = this.getWorkspaceSessionHostIdForTab(worktreeId, tabId)
       const resolvedSession = this.store?.getWorkspaceSession?.(resolvedHostId)
       // Emptying the last tab may reroute the worktree to its catalog host.
       const hostId = resolvedSession?.tabsByWorktree[worktreeId]?.some((tab) => tab.id === tabId)
@@ -129,15 +138,17 @@ export class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRu
         : null
     let ptyIdsToKill: string[] = []
     let refusal: Error | undefined
+    const hostIds = () => this.getWorkspaceSessionHostIdsForTab(worktreeId, target.tabId)
+    const fenced = acknowledgeTabRetirement !== null
     try {
       refusal = await store.runDurableMutation(
-        terminalSurfaceCloseMutation({
+        closeLeafOrTab({
           worktreeId,
           target,
           options,
-          requestedSession: this.getWorkspaceSessionForWorktree(worktreeId),
+          ...captureTerminalCloseRequest(worktreeId, target, hostIds(), store, fenced),
           ownerMatches: () => !acknowledgeTabRetirement || acknowledgeTabRetirement().matches,
-          hostId: () => this.getWorkspaceSessionHostIdForWorktree(worktreeId),
+          hostIds,
           getSession: (hostId) => store.getWorkspaceSession(hostId),
           setSession: (session, hostId) => store.setWorkspaceSession(session, hostId),
           onClosed: (closedPtyIds) => {
@@ -190,6 +201,8 @@ export class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRu
     worktreeId: string,
     target: TerminalPaneCloseTarget
   ): Promise<void> {
+    // An explicit close (a phone's, the CLI's): a launch still starting or delivering there stops.
+    markAgentLaunchesClosedByUser(worktreeId, target)
     try {
       await this.closeTerminalSurface(worktreeId, target, { allowMissing: true })
     } catch (error) {
@@ -251,32 +264,6 @@ export class OrcaRuntimeWithBuildHeadlessMobileSessionBrowserTabs extends OrcaRu
       this.storeMobileSessionSnapshot(worktreeId, retired.snapshot)
       this.notifyMobileSessionTabsChanged(worktreeId)
     }
-  }
-
-  protected persistHeadlessTerminalTabOrder(worktreeId: string, tabOrder: readonly string[]): void {
-    const session = this.getWorkspaceSessionForWorktree(worktreeId)
-    if (!session || !this.store?.setWorkspaceSession) {
-      return
-    }
-    const orderIndexByTabId = new Map(tabOrder.map((tabId, index) => [tabId, index]))
-    const tabs = session.tabsByWorktree[worktreeId] ?? []
-    const reordered = [...tabs]
-      .sort((a, b) => {
-        const aIndex = orderIndexByTabId.get(a.id) ?? Number.MAX_SAFE_INTEGER
-        const bIndex = orderIndexByTabId.get(b.id) ?? Number.MAX_SAFE_INTEGER
-        return aIndex - bIndex || a.sortOrder - b.sortOrder || a.createdAt - b.createdAt
-      })
-      .map((tab, index) => ({
-        ...tab,
-        sortOrder: index
-      }))
-    this.setWorkspaceSessionForWorktree(worktreeId, {
-      ...session,
-      tabsByWorktree: {
-        ...session.tabsByWorktree,
-        [worktreeId]: reordered
-      }
-    })
   }
 
   protected emitMobileSessionTabsSnapshot(snapshot: RuntimeMobileSessionTabsSnapshot): void {

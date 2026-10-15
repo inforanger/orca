@@ -1,5 +1,6 @@
 import { join } from 'node:path'
 import type { CommandHandler } from '../dispatch'
+import { readCommandBody } from '../command-body-input'
 import { printResult } from '../format'
 import { rejectRemoteSelectionFlags } from '../remote-selection-flag-rejection'
 import {
@@ -12,6 +13,11 @@ import type { AgentHookInstallStatus } from '../../shared/agent-hook-types'
 import { DEFAULT_LOCAL_ORCA_PROFILE_ID } from '../../shared/orca-profiles'
 import type { GlobalSettings } from '../../shared/global-settings-types'
 import type { ProfileStateOfflineLocation } from '../../main/persistence/profile-state/profile-state-offline-settings'
+import {
+  DEFAULT_AGENT_CHECKPOINT_PATH,
+  loadAgentCheckpoint,
+  renderAgentCheckpointContext
+} from '../../main/agent-checkpoint/agent-checkpoint'
 
 type AgentHookCommandResult = {
   enabled: boolean
@@ -140,8 +146,12 @@ function localSuccess<TResult>(result: TResult): RuntimeRpcSuccess<TResult> {
 }
 
 function formatAgentHookCommandResult(result: AgentHookCommandResult): string {
+  // Why the path: it names the home a status reports on, which the CLI's process may not share with the app's panes.
   const statusSummary = result.statuses
-    .map((status) => `${status.agent}: ${status.state}`)
+    .map(
+      (status) =>
+        `${status.agent}: ${status.state}${status.configPath ? ` (${status.configPath})` : ''}`
+    )
     .join('\n')
   return [
     `agentStatusHooksEnabled: ${result.enabled}`,
@@ -174,6 +184,65 @@ async function setAgentHooksEnabled(
 }
 
 export const AGENT_HOOK_HANDLERS: Record<string, CommandHandler> = {
+  'agent checkpoint context': async ({ client, flags }) => {
+    const identity = checkpointIdentityFromEnvironment(flags)
+    if (!identity) {
+      const checkpoint = await loadAgentCheckpoint()
+      process.stdout.write(
+        `${renderAgentCheckpointContext(checkpoint, checkpointTaskFromFlags(flags))}\n`
+      )
+      return
+    }
+    const task = checkpointTaskFromFlags(flags)
+    const response = await client.call<{ context: string }>(
+      'agentHooks.checkpointContext',
+      {
+        ...identity,
+        ...(task?.taskId ? { taskId: task.taskId } : {}),
+        ...(process.env.ORCA_AGENT_CHECKPOINT_TASK_SUMMARY
+          ? { taskSummary: process.env.ORCA_AGENT_CHECKPOINT_TASK_SUMMARY }
+          : {}),
+        ...(task ? { taskSummary: task.taskSummary } : {})
+      }
+    )
+    process.stdout.write(`${response.result.context}\n`)
+  },
+  'agent checkpoint apply': async ({ client, flags, cwd, json }) => {
+    const identity = checkpointIdentityFromEnvironment(flags)
+    if (!identity) {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        'Cannot apply CHECKPOINT.md without ORCA_PANE_KEY from an Orca-launched agent session.'
+      )
+    }
+    const body = await readCommandBody(flags, cwd, {
+      required: true,
+      maximumCharacters: 65_536,
+      tooLargeCode: 'invalid_argument',
+      label: 'Checkpoint application JSON'
+    })
+    let application: unknown
+    try {
+      application = JSON.parse(body)
+    } catch {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        'Checkpoint application input is not valid JSON.'
+      )
+    }
+    const response = await client.call<{
+      accepted: boolean
+      code?: string
+    }>('agentHooks.checkpointApply', { ...identity, application })
+    if (!response.result.accepted) {
+      const code = response.result.code ?? 'analysis_required'
+      throw new RuntimeClientError(
+        'invalid_argument',
+        `CHECKPOINT application rejected (${code}) for ${DEFAULT_AGENT_CHECKPOINT_PATH}. Read the current document and submit complete task-specific analysis.`
+      )
+    }
+    printResult(response, json, () => 'CHECKPOINT application accepted for this Orca session.')
+  },
   'agent hooks prepare-codex': async ({ client, flags }) => {
     rejectRemoteHookSelection(flags)
     if (!process.env.WSL_DISTRO_NAME?.trim()) {
@@ -216,6 +285,37 @@ export const AGENT_HOOK_HANDLERS: Record<string, CommandHandler> = {
     const result = await setAgentHooksEnabled(client, true)
     printResult(localSuccess(result), json, formatAgentHookCommandResult)
   }
+}
+
+function checkpointIdentityFromEnvironment(
+  flags: ReadonlyMap<string, string | boolean> = new Map()
+): { paneKey: string; launchToken?: string; agentId?: string } | null {
+  const paneKey = process.env.ORCA_PANE_KEY?.trim()
+  if (!paneKey) {
+    return null
+  }
+  const launchToken = process.env.ORCA_AGENT_LAUNCH_TOKEN?.trim()
+  const explicitAgentId = flags.get('agent-id')
+  const agentId =
+    typeof explicitAgentId === 'string'
+      ? explicitAgentId.trim()
+      : process.env.ORCA_AGENT_CHECKPOINT_AGENT_ID?.trim()
+  return {
+    paneKey,
+    ...(launchToken ? { launchToken } : {}),
+    ...(agentId ? { agentId } : {})
+  }
+}
+
+function checkpointTaskFromFlags(
+  flags: ReadonlyMap<string, string | boolean>
+): { taskId?: string; taskSummary: string } | undefined {
+  const taskId = flags.get('task-id')
+  const taskSummary = flags.get('task-summary')
+  if (typeof taskSummary !== 'string') {
+    return undefined
+  }
+  return typeof taskId === 'string' ? { taskId, taskSummary } : { taskSummary }
 }
 
 function rejectRemoteHookSelection(flags: ReadonlyMap<string, string | boolean>): void {

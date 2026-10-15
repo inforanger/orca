@@ -1,13 +1,12 @@
+import { isRemoteRuntimePtyId } from '../../../../shared/remote-runtime-pty-id'
 import { getPtyIpc } from '../../pty-host-bindings'
 import { parseAppSshPtyId } from '../../../providers/ssh-pty-id'
 import {
   findPaneCodexOnSharedServer,
-  isCodexPaneOnOrcaMirrorHome,
   resolveCodexPaneHome
 } from '../../../codex/codex-shared-server-pane'
 import {
   disableCodexSharedServerAutoStart,
-  disableCodexSharedServerAutoStartOnOrcaMirror,
   stopCodexSharedServer
 } from '../../../codex/codex-shared-server-fix'
 import { getLegacyDaemonAdapters } from '../../../daemon/daemon-provider-routing'
@@ -18,6 +17,7 @@ import {
 import type { CodexSharedServerStatus } from '../../../../shared/codex-shared-server-command'
 import { ptyOwnership } from '../provider/ownership-state'
 import { getProviderForPty, hasPtyProviderForInspection } from '../provider/registry'
+import { LOCAL_EXECUTION_HOST_ID } from '../../../../shared/execution-host'
 
 // Why per shell: a new terminal fixes Codex only where this build's daemon gives that shell Orca's
 // codex function; cmd.exe and unrecognized shells never get one.
@@ -36,9 +36,9 @@ async function findLocalPaneRootPid(deps: Deps, id: unknown): Promise<number | n
   // Why local only: SSH and WSL panes run Codex on another host, which must answer for itself.
   if (
     typeof id !== 'string' ||
-    id.startsWith('remote:') ||
+    isRemoteRuntimePtyId(id) ||
     parseAppSshPtyId(id) ||
-    (ptyOwnership.get(id) ?? null) !== null
+    (ptyOwnership.get(id) ?? LOCAL_EXECUTION_HOST_ID) !== LOCAL_EXECUTION_HOST_ID
   ) {
     return null
   }
@@ -95,18 +95,14 @@ function runForPaneHome(fix: (codexHome: string) => Promise<boolean>) {
   }
 }
 
-// Why: a real-home pane writes ~/.codex directly; only the mirror needs promotion around the write.
-function disableForPane(id: string): Promise<boolean> {
-  return runForPaneHome(
-    isCodexPaneOnOrcaMirrorHome(id)
-      ? disableCodexSharedServerAutoStartOnOrcaMirror
-      : disableCodexSharedServerAutoStart
-  )(id)
-}
-
 // Why its own read: only a pane already showing Codex asks, so no cadence poll pays for argv.
 export function installPtyCodexSharedServerIpcHandler(deps: Deps): void {
   handleLocalPane(deps, 'pty:isCodexOnSharedServer', readPaneSharedServerStatus, { joined: false })
-  handleLocalPane(deps, 'pty:disableCodexSharedServerAutoStart', disableForPane, false)
+  handleLocalPane(
+    deps,
+    'pty:disableCodexSharedServerAutoStart',
+    runForPaneHome(disableCodexSharedServerAutoStart),
+    false
+  )
   handleLocalPane(deps, 'pty:stopCodexSharedServer', runForPaneHome(stopCodexSharedServer), false)
 }

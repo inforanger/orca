@@ -13,6 +13,7 @@ import type {
 } from '../../../shared/agent-session-wire'
 import type { MutationPlan } from './structured-agent-session-mutation-plans'
 import type { AgentSessionTurnContext, TurnOutcome } from './structured-agent-session-turns'
+import { contextStructuredAgentSessionCurrentWork } from './structured-agent-session-current-work'
 
 function refused(
   reason: AgentSessionRefusalReason<'agent_session_operation_invalid'>,
@@ -47,16 +48,15 @@ export async function performThreadGoalChange(
   ctx: AgentSessionTurnContext,
   input: { clientOperationId: string; change: AgentSessionThreadGoalChange }
 ): Promise<TurnOutcome<AgentSessionThreadGoalResult>> {
-  if (!ctx.adapter.changeThreadGoal || !ctx.adapter.supportsThreadGoal?.(ctx.sessionId)) {
+  if (!ctx.adapter.changeThreadGoal || !ctx.agents.capabilities(ctx.agent)?.threadGoal) {
     return refused('goalsUnsupported', 'Goals are unavailable for this chat session.')
   }
   const { change } = input
   const identity = objectiveIdentity(input.clientOperationId)
   let replacesGoal = false
   if (change.kind === 'set') {
-    // A goal transition the host accepted but has not journaled yet decides this too.
-    await ctx.flushStreamedEvents()
-    // Read before the objective row lands: that row is a message, not a goal transition.
+    // Read before the objective row lands: that row is a message, not a goal transition. A goal
+    // transition the host accepted is already in the fold: it landed at its call.
     replacesGoal = ctx.journal.threadGoal() !== null
   }
   // Journal first: an active goal starts provider work at once, and the objective
@@ -71,7 +71,7 @@ export async function performThreadGoalChange(
         sentAs: 'goal'
       },
       // Accepting a goal is delivering it, so it joins whatever turn runs now.
-      { fence: ctx.fence, turnScope: ctx.journal.liveTurnScope() }
+      { fence: ctx.fence, turnScope: contextStructuredAgentSessionCurrentWork(ctx).turnScope() }
     )
   }
   const withdrawObjective = async (): Promise<void> => {

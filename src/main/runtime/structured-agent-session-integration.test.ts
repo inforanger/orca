@@ -1,3 +1,4 @@
+import './rpc/unused-default-rpc-methods.test-fixture'
 // One structured Codex session driven end to end over `agentSession.*`.
 //
 // Nothing here is stubbed except the Codex child itself: the RPC dispatcher, the
@@ -44,6 +45,8 @@ import {
   stopStructuredAgentSessionRuntime
 } from './structured-agent-session-runtime'
 import { createStructuredAgentSessionLogger } from '../native-chat/agent-session-wire/structured-agent-session-logger'
+import { codexProviderHandle } from '../../shared/agent-session-provider-handle-encoding'
+import { scriptedCodexTransport } from './scripted-codex-transport.test-fixture'
 
 const journals = createTrackedJournalOpener()
 
@@ -51,6 +54,13 @@ const SESSION = 'session-integration-1'
 const THREAD = 'thread-integration'
 const TURN = 'turn-1'
 const WORKSPACE = 'workspace-1'
+const JOURNAL_IDENTITY = {
+  sessionId: SESSION,
+  workspaceId: WORKSPACE,
+  hostId: 'local',
+  agent: 'codex' as const,
+  providerHandle: codexProviderHandle(THREAD)
+}
 // The capability set the desktop renderer advertises. Without the pending-send
 // one the host holds the reply until the send settles, which is a shim for
 // clients too old to render a pending bubble — not what this suite models.
@@ -318,8 +328,9 @@ beforeEach(async () => {
   shellEnvironmentPolicy = { inheritAll: true, names: [] }
   const runtime = {
     getRuntimeId: () => 'runtime-1',
-    getClientSettings: () => ({ experimentalStructuredNativeChat: true }),
+    getClientSettings: () => ({ experimentalNativeChat: true }),
     getStructuredAgentSessionCreateSupport: async () => ({ supported: true }),
+    structuredAgentSessionLaunchSeedOptions: () => undefined,
     resolveStructuredAgentSessionCreateIntent: async () => {
       const {
         envelope: _envelope,
@@ -337,7 +348,8 @@ beforeEach(async () => {
         claimKeyId: 'key-1',
         resolveWorkspacePath: async (workspaceId) => `/repos/${workspaceId}`,
         resolveCodexCommand: () => '/usr/local/bin/codex',
-        resolveClaudeAuthPolicy: () => ({ stripAuthEnv: true }),
+        resolveLaunchArgs: () => [],
+        resolveClaudeAuthPolicy: () => ({ account: 'managed' }),
         resolveEnvironment: async () => {
           bootEnvironmentReads += 1
           return {
@@ -347,12 +359,14 @@ beforeEach(async () => {
           }
         },
         resolveShellEnvironmentPolicy: () => shellEnvironmentPolicy,
-        resolveCodexOverrides: () => {
+        resolveAgentLaunchEnv: (agent): Record<string, string> => {
+          if (agent !== 'codex') {
+            return {}
+          }
           codexOverrideReads += 1
           return { CODEX_PROFILE: configuredCodexProfile }
         },
-        openCodexConnection: codex.openConnection,
-        readProcessStartTime: async () => 1_700_000_000_000
+        ...scriptedCodexTransport(codex.openConnection)
       }).then(() => undefined),
     registerOwnedSubscriptionCleanup: vi.fn((_id: string, dispose: () => void) => ({
       releaseIfCurrent: dispose
@@ -401,15 +415,8 @@ afterEach(async () => {
 
 describe('a structured codex session over agentSession.*', () => {
   it('hydrates provider options after activating a legacy-imported journal', async () => {
-    const identity = {
-      sessionId: SESSION,
-      workspaceId: WORKSPACE,
-      hostId: 'local',
-      agent: 'codex' as const,
-      providerHandle: { kind: 'codex' as const, threadId: THREAD }
-    }
     const journal = await journals.open({
-      identity,
+      identity: JOURNAL_IDENTITY,
       stateDirectory: root
     })
     const rollout = join(root, 'legacy-rollout.jsonl')
@@ -822,15 +829,8 @@ describe('a structured codex session over agentSession.*', () => {
     await stopping
 
     expect(waitedForFinalAppend).toBe(true)
-    const identity = {
-      sessionId: SESSION,
-      workspaceId: WORKSPACE,
-      hostId: 'local',
-      agent: 'codex' as const,
-      providerHandle: { kind: 'codex' as const, threadId: THREAD }
-    }
     const reopened = await journals.open({
-      identity,
+      identity: JOURNAL_IDENTITY,
       stateDirectory: root
     })
     expect(reopened.snapshot().items.map(textOf)).toContain('Final text before shutdown.')

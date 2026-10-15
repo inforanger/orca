@@ -1,8 +1,10 @@
 import { toast } from 'sonner'
 import { getConnectionId } from '@/lib/connection-context'
+import { ensureDetectedAgentsForWorktree } from '@/lib/agent-detection-target-inventory'
 import { focusTerminalTabSurface } from '@/lib/focus-terminal-tab-surface'
 import { findGithubPrWorkspaceAttachment } from '@/lib/github-work-item-workspace-attachment'
 import { launchAgentInNewTab } from '@/lib/launch-agent-in-new-tab'
+import { newAgentLaunchRequestId } from '@/lib/agent-launch-request-id'
 import { launchWorkItemDirect } from '@/lib/launch-work-item-direct'
 import { getLocalProjectExecutionRuntimeContext } from '@/lib/local-preflight-context'
 import { CLIENT_PLATFORM } from '@/lib/new-workspace'
@@ -80,11 +82,9 @@ async function resolveSavedAgentOverride(
 
 async function pickExistingWorktreeAgent(
   worktreeId: string,
-  savedAgent: TuiAgent | null | undefined,
-  repoConnectionId: string | null | undefined
+  savedAgent: TuiAgent | null | undefined
 ): Promise<TuiAgent | null> {
-  const connectionId = getConnectionId(worktreeId) ?? repoConnectionId ?? null
-  const detectedAgents = await detectAgentsForConnection(connectionId)
+  const detectedAgents = await ensureDetectedAgentsForWorktree(useAppStore.getState(), worktreeId)
   if (savedAgent) {
     if (isAgentAvailable(savedAgent, detectedAgents)) {
       return savedAgent
@@ -140,7 +140,12 @@ export async function startFixChecksAgent(args: StartFixChecksAgentArgs): Promis
   const attachedWorkspace =
     args.worktreeId || !args.item
       ? null
-      : findGithubPrWorkspaceAttachment(store.allWorktrees(), args.repoId, args.item.number)
+      : findGithubPrWorkspaceAttachment(
+          store.allWorktrees(),
+          args.repoId,
+          args.item.number,
+          args.item.url
+        )
   const targetWorktreeId = args.worktreeId ?? attachedWorkspace?.id ?? null
   if (targetWorktreeId) {
     const targetWorktree = store.allWorktrees().find((worktree) => worktree.id === targetWorktreeId)
@@ -154,11 +159,7 @@ export async function startFixChecksAgent(args: StartFixChecksAgentArgs): Promis
       return false
     }
     const targetConnectionId = getConnectionId(targetWorktreeId) ?? repo?.connectionId ?? null
-    const agent = await pickExistingWorktreeAgent(
-      targetWorktreeId,
-      savedAgentId,
-      repo?.connectionId
-    )
+    const agent = await pickExistingWorktreeAgent(targetWorktreeId, savedAgentId)
     if (!agent) {
       return false
     }
@@ -188,6 +189,7 @@ export async function startFixChecksAgent(args: StartFixChecksAgentArgs): Promis
     }
     let revealFailed = false
     const result = launchAgentInNewTab({
+      requestId: newAgentLaunchRequestId(),
       agent,
       worktreeId: targetWorktreeId,
       groupId: args.groupId ?? targetWorktreeId,

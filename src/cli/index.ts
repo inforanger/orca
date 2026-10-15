@@ -37,7 +37,7 @@ function shouldIgnoreRemoteSelection(commandPath: string[]): boolean {
     // so routing the other half produced one listing describing two machines at once.
     commandPath.join(' ') === 'host list' ||
     commandPath[0] === 'serve' ||
-    commandPath[0] === 'agent' ||
+    (commandPath[0] === 'agent' && commandPath[1] !== 'launch') ||
     commandPath[0] === 'vm' ||
     commandPath[0] === 'agent-context' ||
     commandPath[0] === 'profile'
@@ -112,10 +112,8 @@ export async function main(
     // lookup so users do not get misleading "Orca is not running" failures for
     // simple command typos or unsupported flags.
     validateCommandAndFlags(COMMAND_SPECS, parsed)
-    refuseConflictingSessionCallerFlags(
-      findCommandSpec(COMMAND_SPECS, parsed.commandPath),
-      parsed.flags
-    )
+    const commandSpec = findCommandSpec(COMMAND_SPECS, parsed.commandPath)
+    refuseConflictingSessionCallerFlags(commandSpec, parsed.flags)
     const RuntimeClientClass = await loadRuntimeClientClass()
     const ignoreRemoteSelection = shouldIgnoreRemoteSelection(parsed.commandPath)
     const pairingCode = ignoreRemoteSelection ? null : parsed.flags.get('pairing-code')
@@ -182,7 +180,8 @@ export async function main(
         return client
       },
       cwd,
-      json
+      json,
+      rawArgs: argv
     })
   } catch (error) {
     const worktreeSelector = parsed.flags.get('worktree')
