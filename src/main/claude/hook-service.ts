@@ -16,6 +16,7 @@ import {
 } from '../agent-hooks/installer-utils-remote'
 import { refreshManagedScriptIfPresent } from '../agent-hooks/managed-hook-script-refresh'
 import { getManagedScript } from './hook-script'
+import { getAgentCheckpointToolMatcher } from '../agent-checkpoint/agent-checkpoint-tool-policy'
 import {
   getWindowsClaudeHookExecutablePath,
   getWindowsClaudeHookFileStatus,
@@ -32,6 +33,9 @@ import {
   applyManagedStatusLine,
   CLAUDE_HOOK_SETTINGS,
   getManagedScriptFileName,
+  getCheckpointGateEventHook,
+  getCheckpointGateScriptFileName,
+  getCheckpointGateScriptPath,
   getConfigPath,
   getManagedEventHook,
   getManagedScriptPath,
@@ -43,6 +47,7 @@ import {
   getStatusLineScriptPath,
   getStatusLineSlotState,
   findManagedEventHookForms,
+  hasSameManagedHookInvocation,
   removeManagedHooks,
   removeManagedStatusLine,
   type ClaudeCompatibleHookSettings
@@ -88,11 +93,12 @@ export class ClaudeHookService {
     return process.platform === 'win32' && this.options.agent === 'claude'
   }
 
-  private managedScript(target: 'local' | 'posix' = 'local'): string {
+  private managedScript(target: 'local' | 'posix' = 'local', checkpointGate = false): string {
     return getManagedScript(target, {
       source: this.options.source,
       skipWhenDevinImportsClaude: this.options.agent === 'claude',
-      skipWhenGrokImportsClaude: this.options.agent === 'claude'
+      skipWhenGrokImportsClaude: this.options.agent === 'claude',
+      checkpointGate
     })
   }
 
@@ -131,6 +137,11 @@ export class ClaudeHookService {
         getManagedEventHook(eventName, scriptPath, this.options.settings, path)
       )
     )
+    const checkpointGateReady =
+      this.options.agent !== 'claude' || this.hasCheckpointGate(config)
+    if (!checkpointGateReady) {
+      missing.push('PreToolUse checkpoint gate')
+    }
     const presentCount = matchedForms.length
     const managedHooksPresent = presentCount > 0
     let state: AgentHookInstallState
@@ -151,12 +162,33 @@ export class ClaudeHookService {
       : status
   }
 
+  private hasCheckpointGate(config: HooksConfig): boolean {
+    const matcher = getAgentCheckpointToolMatcher('claude')
+    const gateScriptPath = getCheckpointGateScriptPath(this.options.settings)
+    if (!matcher || !existsSync(gateScriptPath)) {
+      return false
+    }
+    const expectedHook = getCheckpointGateEventHook(gateScriptPath)
+    const definitions = config.hooks?.PreToolUse
+    return Array.isArray(definitions) && definitions.some(
+      (definition) =>
+        definition.matcher === matcher &&
+        (definition.hooks ?? []).some((hook) => hasSameManagedHookInvocation(hook, expectedHook))
+    )
+  }
+
   async refreshManagedScripts(): Promise<void> {
     const scriptPath = getManagedScriptPath(this.options.settings)
     const payload = this.managedScript()
     await (this.usesWindowsEntry
       ? refreshWindowsClaudeHookFiles(scriptPath, payload)
       : refreshManagedScriptIfPresent(scriptPath, payload))
+    if (this.options.agent === 'claude') {
+      await refreshManagedScriptIfPresent(
+        getCheckpointGateScriptPath(this.options.settings),
+        this.managedScript('local', true)
+      )
+    }
     // Why: no agent gate — the statusline script only ever exists for claude, so presence is the gate.
     await refreshManagedScriptIfPresent(
       getStatusLineScriptPath(this.options.settings),
@@ -184,17 +216,35 @@ export class ClaudeHookService {
 
     const plan = this.managedHookPlan(options)
     const exePath = this.usesWindowsEntry ? installWindowsClaudeHookExecutable(scriptPath) : null
+    const checkpointMatcher =
+      this.options.agent === 'claude' ? getAgentCheckpointToolMatcher('claude') : null
+    const checkpointGate = checkpointMatcher
+      ? {
+          matcher: checkpointMatcher,
+          hook: getCheckpointGateEventHook(
+            getCheckpointGateScriptPath(this.options.settings)
+          ),
+          scriptFileName: getCheckpointGateScriptFileName(this.options.settings)
+        }
+      : undefined
     let nextConfig = applyManagedHooks(
       config,
       (eventName) => getManagedEventHook(eventName, scriptPath, this.options.settings, exePath),
       getManagedScriptFileName(this.options.settings),
-      plan
+      plan,
+      checkpointGate
     )
     const payload = this.managedScript()
     if (this.usesWindowsEntry) {
       installWindowsClaudeHookFiles(scriptPath, payload)
     } else {
       writeManagedScript(scriptPath, payload)
+    }
+    if (checkpointGate) {
+      writeManagedScript(
+        getCheckpointGateScriptPath(this.options.settings),
+        this.managedScript('local', true)
+      )
     }
     // Why: a profile's statusLine arrives with the settings copy from the default home.
     if (options.configDir === undefined && plan.statusLine === 'install') {
@@ -319,7 +369,10 @@ export class ClaudeHookService {
     }
     const { config: hooksRemoved, changed: hooksChanged } = removeManagedHooks(
       config,
-      getManagedScriptFileName(this.options.settings)
+      getManagedScriptFileName(this.options.settings),
+      this.options.agent === 'claude'
+        ? getCheckpointGateScriptFileName(this.options.settings)
+        : undefined
     )
     const { config: nextConfig, changed: statusLineChanged } = removeManagedStatusLine(
       hooksRemoved,
@@ -329,6 +382,7 @@ export class ClaudeHookService {
       writeHooksJson(configPath, nextConfig)
     }
     if (this.options.agent === 'claude') {
+      rmSync(getCheckpointGateScriptPath(this.options.settings), { force: true })
       try {
         // Why: an Orca-level uninstall resets the opt-out memory so a later re-enable installs the statusline again.
         rmSync(getStatusLineInstallMarkerPath(this.options.settings), { force: true })

@@ -4,9 +4,10 @@ import { removeTreeSync } from '../../shared/windows-transient-lock-removal'
 import { homedir, tmpdir } from 'node:os'
 import type * as Os from 'node:os'
 import { join } from 'node:path'
-import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { runProcess } from '@orca/process-host'
+import { getEndpointFileName, writeEndpointFile } from '../../shared/agent-hook-listener/endpoint-publication'
 import { isCodexManagedCommand, setupCodexHookHomes } from './hook-service-test-harness'
 
 const { getPathMock, homedirMock } = vi.hoisted(() => ({
@@ -30,6 +31,7 @@ vi.mock('os', async (importOriginal) => {
 
 import { CodexHookService } from './hook-service'
 import { getManagedCommand } from './codex-hook-definition'
+import { getManagedScript } from './codex-hook-script'
 import { runExclusivelyForCodexTrustConfig } from './codex-trust-config-mutation-queue'
 
 const homes = setupCodexHookHomes(homedirMock, getPathMock)
@@ -49,6 +51,10 @@ function localManagedCodexEvents(): string[] {
 }
 
 describe('CodexHookService', () => {
+  it('labels endpoint failure as unsupported checkpoint enforcement', () => {
+    expect(getManagedScript()).toContain('this fallback does not block mutations')
+  })
+
   // Why (#16441): install promotes in-Orca approvals into ~/.codex/config.toml
   // and mirrors that file into the managed home, so holding only the runtime
   // lane still lets it land inside a real-home grant's capture->restore window.
@@ -325,6 +331,16 @@ describe('CodexHookService', () => {
       const port = (server.address() as AddressInfo).port
 
       try {
+        const endpointDir = join(homedir(), '.orca', 'agent-hooks')
+        const endpointPath = join(endpointDir, getEndpointFileName())
+        expect(
+          writeEndpointFile(endpointDir, endpointPath, {
+            port,
+            token: 'tok123',
+            env: 'test',
+            version: '1'
+          })
+        ).toBe(true)
         const payload = JSON.stringify({
           prompt: '你好世界',
           hook_event_name: 'UserPromptSubmit'
@@ -339,28 +355,44 @@ describe('CodexHookService', () => {
             delete cleanEnv[key]
           }
         }
-        const child = spawn('cmd.exe', ['/d', '/c', scriptPath], {
+        const result = await runProcess({
+          program: scriptPath,
           env: {
             ...cleanEnv,
-            ORCA_AGENT_HOOK_PORT: String(port),
-            ORCA_AGENT_HOOK_TOKEN: 'tok123',
+            ORCA_AGENT_HOOK_ENDPOINT: endpointPath,
             ORCA_PANE_KEY: '42:leaf-abc',
             ORCA_TAB_ID: '42',
             ORCA_WORKTREE_ID: 'C:\\work trees\\my repo & co',
-            ORCA_AGENT_HOOK_VERSION: '1'
-          }
+          },
+          input: payload,
+          timeoutMs: 5_000,
+          terminationBarrier: true
         })
-        child.stdin.end(payload)
-        const exitCode = await new Promise<number>((resolve) => child.on('close', resolve))
-        expect(exitCode).toBe(0)
+        expect(result.timedOut, `hook child timed out: ${result.stderr}`).toBe(false)
+        expect(result.code, `hook child output: ${result.stdout} ${result.stderr}`).toBe(0)
 
-        const received = await receivedPromise
+        let receiveTimer: ReturnType<typeof setTimeout> | undefined
+        const received = await Promise.race([
+          receivedPromise,
+          new Promise<never>((_, reject) => {
+            receiveTimer = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `hook child exited without a listener POST (stdout=${result.stdout}; stderr=${result.stderr})`
+                  )
+                ),
+              3_000
+            )
+          })
+        ]).finally(() => clearTimeout(receiveTimer))
         const params = new URLSearchParams(received.body)
         expect(received.headers['x-orca-agent-hook-token']).toBe('tok123')
         expect(params.get('paneKey')).toBe('42:leaf-abc')
         expect(params.get('worktreeId')).toBe('C:\\work trees\\my repo & co')
         expect(JSON.parse(params.get('payload') ?? '{}').prompt).toBe('你好世界')
       } finally {
+        server.closeAllConnections()
         await new Promise<void>((resolve) => server.close(() => resolve()))
       }
     }

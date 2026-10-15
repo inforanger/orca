@@ -16,8 +16,12 @@ import {
 import {
   CODEX_EVENTS,
   CODEX_EVENT_LABEL,
+  buildCodexCheckpointGateDefinition,
   buildCodexManagedHook,
+  computeCodexCheckpointGateHash,
   getCodexConfigTomlPath,
+  getCheckpointGateCommand,
+  getCheckpointGateScriptPath,
   getConfigPath,
   getManagedCommand,
   getManagedScriptPath,
@@ -72,6 +76,14 @@ export async function installCodexHooksExclusively(
   // Why: match by script filename (not exact command) so a fresh install sweeps stale entries from older builds or a different userData path.
   const isManagedCommand = createManagedCommandMatcher(getCodexManagedScriptFileName())
   const command = getManagedCommand(scriptPath)
+  const checkpointGateCommand = getCheckpointGateCommand(getCheckpointGateScriptPath())
+  const checkpointGateDefinition =
+    hashes[CODEX_EVENT_LABEL.PreToolUse] !== undefined
+      ? buildCodexCheckpointGateDefinition(checkpointGateCommand)
+      : null
+  const checkpointGateHash = checkpointGateDefinition
+    ? computeCodexCheckpointGateHash(checkpointGateCommand)
+    : null
   const hookPlan = getRuntimeHooksWithSystemUserHooks(config.hooks, isManagedCommand, configPath)
   if (!hookPlan) {
     return {
@@ -109,7 +121,8 @@ export async function installCodexHooksExclusively(
   )
   const mirroredUserTrustEntries = moveMirroredRuntimeUserTrustAfterManagedStatusHook(
     hookPlan.trustEntries,
-    listedLabels
+    listedLabels,
+    checkpointGateDefinition ? { pre_tool_use: 2 } : {}
   )
   const mirroredTrustEntries: CodexTrustEntry[] = mirroredUserTrustEntries.map(({ entry }) => entry)
   const managedTrustEntries: CodexTrustEntry[] = []
@@ -129,7 +142,10 @@ export async function installCodexHooksExclusively(
     }
     const hook = buildCodexManagedHook(command, eventName)
     const definition: HookDefinition = { hooks: [hook] }
-    nextHooks[eventName] = [definition, ...cleaned]
+    nextHooks[eventName] =
+      eventName === 'PreToolUse' && checkpointGateDefinition
+        ? [definition, checkpointGateDefinition, ...cleaned]
+        : [definition, ...cleaned]
     if (trustedHash === null) {
       // Why: this Codex lists the entry with no hash, so it has no approvals to write.
       continue
@@ -148,12 +164,35 @@ export async function installCodexHooksExclusively(
       // Why: Orca's setting is the only off switch for its hook (a /hooks toggle-off is overridden).
       enabled: true
     })
+    if (
+      eventName === 'PreToolUse' &&
+      checkpointGateDefinition?.matcher &&
+      checkpointGateHash
+    ) {
+      const gateHook = checkpointGateDefinition.hooks?.[0]
+      if (gateHook?.command) {
+        managedTrustEntries.push({
+          sourcePath: trustSourcePath,
+          eventLabel: CODEX_EVENT_LABEL.PreToolUse,
+          groupIndex: 1,
+          handlerIndex: 0,
+          command: gateHook.command,
+          timeoutSec: gateHook.timeout,
+          matcher: checkpointGateDefinition.matcher,
+          trustedHash: checkpointGateHash,
+          enabled: true
+        })
+      }
+    }
   }
   const trustEntries: CodexTrustEntry[] = [...mirroredTrustEntries, ...managedTrustEntries]
   const tomlPath = getCodexConfigTomlPath(runtimeHomePath)
 
   config.hooks = nextHooks
   writeManagedScript(scriptPath, getManagedScript())
+  if (checkpointGateDefinition) {
+    writeManagedScript(getCheckpointGateScriptPath(), getManagedScript('local', { checkpointGate: true }))
+  }
   try {
     // Why: the config.toml mirror and approvals land before hooks.json, which used to create the home.
     mkdirSync(runtimeHomePath, { recursive: true })

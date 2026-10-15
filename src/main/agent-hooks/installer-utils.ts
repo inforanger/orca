@@ -155,9 +155,17 @@ export function buildWindowsAgentHookPostCommand(
 }
 
 // Why: PowerShell per-post costs ~300ms startup and mangles UTF-8 via code-page translation; curl.exe (Win10 1803+) avoids both.
-export function buildWindowsAgentHookCurlPostCommand(source: AgentHookSource): string {
+export function buildWindowsAgentHookCurlPostCommand(
+  source: AgentHookSource,
+  options: {
+    outputResponse?: boolean
+    failOnHttpError?: boolean
+    hookRole?: 'checkpoint'
+  } = {}
+): string {
   return [
     '"%SystemRoot%\\System32\\curl.exe" -sS -X POST',
+    ...(options.failOnHttpError ? ['--fail'] : []),
     `"http://127.0.0.1:%ORCA_AGENT_HOOK_PORT%/hook/${source}"`,
     '--connect-timeout 0.5 --max-time 1.5',
     '-H "Content-Type: application/x-www-form-urlencoded"',
@@ -168,8 +176,9 @@ export function buildWindowsAgentHookCurlPostCommand(source: AgentHookSource): s
     '--data-urlencode "worktreeId=%ORCA_WORKTREE_ID%"',
     '--data-urlencode "env=%ORCA_AGENT_HOOK_ENV%"',
     '--data-urlencode "version=%ORCA_AGENT_HOOK_VERSION%"',
+    ...(options.hookRole ? [`--data-urlencode "hookRole=${options.hookRole}"`] : []),
     '--data-urlencode "payload@-"',
-    '>nul 2>&1'
+    ...(options.outputResponse ? [] : ['>nul 2>&1'])
   ].join(' ')
 }
 

@@ -3,6 +3,8 @@ import {
   POSIX_HOOK_JSON_STDIN_FIRST_BYTE_TIMEOUT_SECONDS,
   POSIX_HOOK_JSON_STDIN_IDLE_TIMEOUT_SECONDS
 } from '../agent-hooks/hook-stdin-contract'
+import { ANTIGRAVITY_PRE_TOOL_USE_DECISION } from './hook-events'
+import { getAgentCheckpointUnavailableDecision } from '../agent-checkpoint/agent-checkpoint-tool-policy'
 
 // curl reads payload@- before starting its timeout; agy can keep that pipe open.
 export const WINDOWS_ANTIGRAVITY_JSON_POST_SCRIPT = String.raw`
@@ -10,7 +12,21 @@ const http = require('node:http');
 const { StringDecoder } = require('node:string_decoder');
 const env = process.env;
 const port = Number(env.ORCA_AGENT_HOOK_PORT);
-if (!Number.isInteger(port) || port < 1 || port > 65535 || !env.ORCA_AGENT_HOOK_TOKEN || !env.ORCA_PANE_KEY) process.exit(0);
+let outputWritten = false;
+function writeFallback() {
+  if (outputWritten) return;
+  if (env.ORCA_ANTIGRAVITY_EVENT === 'Stop') {
+    process.stdout.write('{"decision":""}\n');
+    outputWritten = true;
+  } else if (env.ORCA_ANTIGRAVITY_EVENT === 'PreToolUse') {
+    process.stdout.write(env.ORCA_AGENT_HOOK_ROLE === 'checkpoint' ? '${getAgentCheckpointUnavailableDecision('antigravity')}' : '${ANTIGRAVITY_PRE_TOOL_USE_DECISION}');
+    outputWritten = true;
+  } else if (env.ORCA_ANTIGRAVITY_EVENT === 'SessionStart' || env.ORCA_ANTIGRAVITY_EVENT === 'PreInvocation') {
+    process.stdout.write('{"injectSteps":[{"ephemeralMessage":"ORCA CHECKPOINT DELIVERY ERROR: the authenticated Orca hook endpoint did not respond; checkpoint text was not delivered."}]}\n');
+    outputWritten = true;
+  }
+}
+if (!Number.isInteger(port) || port < 1 || port > 65535 || !env.ORCA_AGENT_HOOK_TOKEN || !env.ORCA_PANE_KEY) { writeFallback(); process.exit(0); }
 const decoder = new StringDecoder('utf8');
 let payload = '';
 let finished = false;
@@ -38,18 +54,37 @@ function finish() {
     ['env', 'ORCA_AGENT_HOOK_ENV'], ['version', 'ORCA_AGENT_HOOK_VERSION'],
     ['hook_event_name', 'ORCA_ANTIGRAVITY_EVENT']
   ]) form.set(name, env[variable] || '');
+  if (env.ORCA_AGENT_HOOK_ROLE) form.set('hookRole', env.ORCA_AGENT_HOOK_ROLE);
+  const agentProcessHint = env.ORCA_ANTIGRAVITY_EVENT === 'SessionStart' || env.ORCA_ANTIGRAVITY_EVENT === 'PreInvocation'
+    ? JSON.stringify({ hookPid: process.pid, platform: process.platform })
+    : '';
+  if (agentProcessHint) form.set('agentProcess', agentProcessHint);
   form.set('payload', payload.trim() ? payload : '{}');
   const body = form.toString();
-  if (Buffer.byteLength(body) > maxBytes) process.exit(0);
+  if (Buffer.byteLength(body) > maxBytes) { writeFallback(); process.exit(0); }
   let request;
-  const exit = () => { if (request) request.destroy(); process.exit(0); };
+  const exit = () => { writeFallback(); if (request) request.destroy(); process.exit(0); };
   const postTimer = setTimeout(exit, 1500);
   try {
+    // The listener verifies this hook PID's ancestor before accepting an AGY process identity.
     request = http.request({ hostname: '127.0.0.1', port, path: '/hook/antigravity', method: 'POST', headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
       'Content-Length': Buffer.byteLength(body),
-      'X-Orca-Agent-Hook-Token': env.ORCA_AGENT_HOOK_TOKEN
-    } }, response => { response.resume(); response.on('end', () => { clearTimeout(postTimer); exit(); }); });
+      'X-Orca-Agent-Hook-Token': env.ORCA_AGENT_HOOK_TOKEN,
+      ...(agentProcessHint ? { 'X-Orca-Agent-Process': agentProcessHint } : {})
+    } }, response => {
+      let responseBody = '';
+      response.on('data', chunk => { responseBody += chunk.toString('utf8'); });
+      response.on('end', () => {
+        clearTimeout(postTimer);
+        if (responseBody.trim()) {
+          process.stdout.write(responseBody);
+          outputWritten = true;
+          if (env.ORCA_ANTIGRAVITY_EVENT !== 'PreToolUse' && !responseBody.endsWith('\n')) process.stdout.write('\n');
+        }
+        exit();
+      });
+    });
     request.on('error', () => { clearTimeout(postTimer); exit(); });
     request.end(body);
   } catch { clearTimeout(postTimer); exit(); }
@@ -59,7 +94,7 @@ resetIdle(${POSIX_HOOK_JSON_STDIN_FIRST_BYTE_TIMEOUT_SECONDS * 1000});
 process.stdin.on('data', chunk => {
   if (finished) return;
   byteLength += chunk.length;
-  if (byteLength > maxBytes) process.exit(0);
+  if (byteLength > maxBytes) { writeFallback(); process.exit(0); }
   const text = decoder.write(chunk);
   payload += text;
   resetIdle(${POSIX_HOOK_JSON_STDIN_IDLE_TIMEOUT_SECONDS * 1000});

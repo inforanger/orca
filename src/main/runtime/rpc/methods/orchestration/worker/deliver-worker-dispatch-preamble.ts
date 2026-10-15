@@ -15,9 +15,25 @@ import { chatAssigneeSessionId } from '../../../../orchestration/chat-assignee'
 import { OrchestrationError } from '../../../../orchestration/orchestration-error'
 import { sendChatTask, type ChatTaskDelivery } from '../chat-task-delivery'
 import { dispatchTaskSource } from '../../../../orchestration/dispatch-task-source'
+import {
+  lineageLiveSession,
+  readAgentSessionRecordStore
+} from '../../../../orchestration/structured-session-lineage'
+import {
+  structuredAgentSessionPaneKey,
+  structuredAgentSessionTabId
+} from '../../../../../../shared/structured-agent-session-projection'
 import type { AgentMessageSource } from '../../../../../../shared/agent-session-message-source'
 import type { WorkerTurnStartObservation } from './worker-start-turn-observation'
 import type { createStructuredWorkerSessionForWorktree } from './worker-topology'
+import {
+  loadAgentCheckpoint,
+  renderAgentCheckpointContext
+} from '../../../../../agent-checkpoint/agent-checkpoint'
+import {
+  agentCheckpointReadiness,
+  type AgentCheckpointDispatchBinding
+} from '../../../../../agent-checkpoint/agent-checkpoint-readiness'
 
 type StructuredSession = Awaited<ReturnType<typeof createStructuredWorkerSessionForWorktree>> | null
 
@@ -51,7 +67,107 @@ export async function deliverWorkerDispatchPreamble(args: {
   structuredTurnStart?: WorkerTurnStartObservation
 }> {
   const { runtime, structuredSession, terminalHandle } = args
-  const preamble = buildDispatchPreamble({
+  const checkpoint = await loadAgentCheckpoint()
+  const paneKey = workerCheckpointPaneKey(args)
+  if (!paneKey) {
+    throw new OrchestrationError(
+      'checkpoint_session_unregistered',
+      `Could not resolve the Orca session identity for Dispatch ${args.dispatchId}; CHECKPOINT.md cannot be bound to task ${args.taskId}.`
+    )
+  }
+  const dispatch = args.db.getDispatchContextById(args.dispatchId)
+  const worker = args.db.getWorkerDispatch(args.dispatchId)
+  if (
+    !dispatch ||
+    dispatch.task_id !== args.taskId ||
+    !isActiveWorkerDispatch(dispatch.status, worker?.state)
+  ) {
+    throw new OrchestrationError(
+      'checkpoint_dispatch_inactive',
+      `Dispatch ${args.dispatchId} is not the active host task for CHECKPOINT.md.`
+    )
+  }
+  const chatSessionId = chatAssigneeSessionId(terminalHandle)
+  const promptOnlyCheckpoint = structuredSession !== null || chatSessionId !== null
+  if (structuredSession) {
+    if (
+      !isOrcaSessionId(structuredSession.identity.sessionId) ||
+      dispatch.assignee_orca_session_id !==
+        canonicalOrcaSessionId(structuredSession.identity.sessionId) ||
+      dispatch.process_incarnation !== structuredSession.identity.processIncarnation ||
+      dispatch.assignee_pane_key !== paneKey
+    ) {
+      throw new OrchestrationError(
+        'checkpoint_dispatch_unverifiable',
+        `Dispatch ${args.dispatchId} does not match the active structured session identity.`
+      )
+    }
+  } else if (chatSessionId) {
+    if (dispatch.assignee_orca_session_id !== canonicalOrcaSessionId(chatSessionId)) {
+      throw new OrchestrationError(
+        'checkpoint_dispatch_unverifiable',
+        `Dispatch ${args.dispatchId} does not match the active chat session identity.`
+      )
+    }
+  } else {
+    const authority = runtime.getOrchestrationDispatchAuthority(terminalHandle)
+    if (
+      !authority?.processIncarnation ||
+      !authority.launchTokenHash ||
+      authority.paneKey !== paneKey ||
+      dispatch.assignee_pane_key !== paneKey ||
+      dispatch.process_incarnation !== authority.processIncarnation ||
+      dispatch.launch_token_hash !== authority.launchTokenHash
+    ) {
+      throw new OrchestrationError(
+        'checkpoint_dispatch_unverifiable',
+        `Dispatch ${args.dispatchId} does not match the active pane, process incarnation, and launch token authority.`
+      )
+    }
+    const binding: AgentCheckpointDispatchBinding = {
+      dispatchId: args.dispatchId,
+      processIncarnation: authority.processIncarnation,
+      launchTokenHash: authority.launchTokenHash,
+      isActive: () => {
+        const currentAuthority = runtime.getOrchestrationDispatchAuthority(terminalHandle)
+        const currentDispatch = args.db.getDispatchContextById(args.dispatchId)
+        const currentWorker = args.db.getWorkerDispatch(args.dispatchId)
+        return Boolean(
+          currentAuthority?.paneKey === paneKey &&
+            currentAuthority.processIncarnation === authority.processIncarnation &&
+            currentAuthority.launchTokenHash === authority.launchTokenHash &&
+            currentDispatch?.task_id === args.taskId &&
+            currentDispatch.assignee_pane_key === paneKey &&
+            currentDispatch.process_incarnation === authority.processIncarnation &&
+            currentDispatch.launch_token_hash === authority.launchTokenHash &&
+            isActiveWorkerDispatch(currentDispatch.status, currentWorker?.state)
+        )
+      }
+    }
+    if (
+      !agentCheckpointReadiness.bindDispatchTask(
+        paneKey,
+        args.taskId,
+        args.taskSpec,
+        checkpoint,
+        binding
+      )
+    ) {
+      throw new OrchestrationError(
+        'checkpoint_dispatch_unverifiable',
+        `Dispatch ${args.dispatchId} could not be bound to one active agent launch.`
+      )
+    }
+  }
+  const checkpointTaskContext = renderAgentCheckpointContext(checkpoint, {
+    taskId: args.taskId,
+    taskSummary: args.taskSpec
+  })
+  const preamble = `${checkpointTaskContext}${
+    promptOnlyCheckpoint
+      ? '\nCHECKPOINT enforcement is unsupported for this structured/chat transport: the canonical source is in this preamble, but this path does not block mutation tools.'
+      : ''
+  }\n\n${buildDispatchPreamble({
     // Depth only. A worker is taught the same verbs whichever mode it runs in, so this must not
     // become a second gate: resolving the caller's worktree is what lets a structured worker
     // dispatch sub-workers exactly like a PTY one.
@@ -67,7 +183,7 @@ export async function deliverWorkerDispatchPreamble(args: {
         : terminalHandle,
     devMode: args.devMode,
     cliCommand: runtime.getTerminalOrchestrationCliCommand(terminalHandle)
-  })
+  })}`
   if (chatAssigneeSessionId(terminalHandle)) {
     const dispatch = args.db.getDispatchContextById(args.dispatchId)
     if (!dispatch) {
@@ -115,6 +231,40 @@ export async function deliverWorkerDispatchPreamble(args: {
   } finally {
     briefGuard?.dispose()
   }
+}
+
+function workerCheckpointPaneKey(args: {
+  runtime: OrcaRuntimeService
+  structuredSession: StructuredSession
+  terminalHandle: string
+}): string | null {
+  if (args.structuredSession) {
+    return args.structuredSession.identity.paneKey
+  }
+  const chatSessionId = chatAssigneeSessionId(args.terminalHandle)
+  if (chatSessionId) {
+    const store = readAgentSessionRecordStore()
+    const current = store ? lineageLiveSession(store, chatSessionId) : null
+    return current
+      ? structuredAgentSessionPaneKey(
+          structuredAgentSessionTabId(current.sessionId),
+          current.sessionId
+        )
+      : null
+  }
+  return args.runtime.getTerminalPaneKey(args.terminalHandle)
+}
+
+function isActiveWorkerDispatch(
+  dispatchStatus: string,
+  workerState: string | undefined
+): boolean {
+  return (
+    (dispatchStatus === 'pending' &&
+      (workerState === 'starting' || workerState === 'start_unknown')) ||
+    (dispatchStatus === 'dispatched' &&
+      (workerState === 'ready' || workerState === 'start_unknown'))
+  )
 }
 
 function chatTaskTurnStart(delivery: ChatTaskDelivery): WorkerTurnStartObservation {

@@ -70,10 +70,14 @@ export function bundleHasStaleManagedCommand(
   return false
 }
 
-function buildEventDefinition(event: AntigravityEvent, command: string): HookDefinition {
+function buildEventDefinition(
+  event: AntigravityEvent,
+  command: string,
+  matcher = '*'
+): HookDefinition {
   if (event.schema === 'tool') {
     return {
-      matcher: '*',
+      matcher,
       hooks: [buildManagedCommandHook(command)]
     }
   }
@@ -104,7 +108,8 @@ function removeManagedCommandsFromBundle(
 export function buildInstalledConfig(
   config: HooksConfig,
   commandForEvent: (event: AntigravityEvent) => string,
-  isManagedCommand: (command: string | undefined) => boolean
+  isManagedCommand: (command: string | undefined) => boolean,
+  checkpointGate?: { matcher: string; command: string }
 ): void {
   const bundle = removeManagedCommandsFromBundle(getBundle(config), isManagedCommand)
 
@@ -113,7 +118,11 @@ export function buildInstalledConfig(
       ? (bundle[event.eventName] as HookDefinition[])
       : []
     const cleaned = removeManagedCommands(current, isManagedCommand)
-    bundle[event.eventName] = [...cleaned, buildEventDefinition(event, commandForEvent(event))]
+    const definitions = [...cleaned, buildEventDefinition(event, commandForEvent(event))]
+    if (event.eventName === 'PreToolUse' && checkpointGate) {
+      definitions.push(buildEventDefinition(event, checkpointGate.command, checkpointGate.matcher))
+    }
+    bundle[event.eventName] = definitions
   }
 
   config[ANTIGRAVITY_HOOK_BUNDLE_NAME] = bundle

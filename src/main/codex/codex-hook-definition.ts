@@ -9,12 +9,16 @@ import {
 } from '../agent-hooks/installer-utils'
 import { POSIX_HOOK_STDIN_DRAIN_COMMAND } from '../agent-hooks/hook-stdin-contract'
 import { getOrcaManagedCodexHomePath, getSystemCodexHomePath } from './codex-home-paths'
-import { buildCodexHookCommand } from './codex-hook-command-form'
+import {
+  buildCodexCheckpointGateCommand,
+  buildCodexHookCommand
+} from './codex-hook-command-form'
 import { CODEX_HOOK_EVENT_LABEL, getCodexManagedScriptFileName } from './codex-hook-identity'
 import { getManagedScript } from './codex-hook-script'
 import type { CodexEventLabel } from './config-toml-trust'
 import type { CodexHookHashes } from './codex-hook-trust-derivation'
 import { computeCodexTrustedHash, normalizeCodexHookTimeoutSec } from './codex-trust-identity'
+import { getAgentCheckpointToolMatcher } from '../agent-checkpoint/agent-checkpoint-tool-policy'
 
 // Why: Pre/PostToolUse feed the live in-flight-tool readout; PermissionRequest exits with no decision so Codex still shows its approval UI while Orca flips the pane to waiting.
 // Interrupt (Codex 0.150+) is the only hook an Esc-cancelled turn fires; older Codex ignores the unknown key.
@@ -112,8 +116,47 @@ export function getManagedScriptPath(): string {
   return getSharedManagedScriptPath(getCodexManagedScriptFileName())
 }
 
+export function getCheckpointGateScriptFileName(): string {
+  return process.platform === 'win32'
+    ? 'codex-checkpoint-gate-hook.cmd'
+    : 'codex-checkpoint-gate-hook.sh'
+}
+
+export function getCheckpointGateScriptPath(): string {
+  return getSharedManagedScriptPath(getCheckpointGateScriptFileName())
+}
+
 export function getManagedCommand(scriptPath: string): string {
   return buildCodexHookCommand(scriptPath)
+}
+
+export function getCheckpointGateCommand(scriptPath: string): string {
+  return buildCodexCheckpointGateCommand(scriptPath)
+}
+
+export function buildCodexCheckpointGateDefinition(command: string): HookDefinition | null {
+  const matcher = getAgentCheckpointToolMatcher('codex')
+  if (!matcher) {
+    return null
+  }
+  return { matcher, hooks: [buildCodexManagedHook(command, 'PreToolUse')] }
+}
+
+export function computeCodexCheckpointGateHash(command: string): string | null {
+  const definition = buildCodexCheckpointGateDefinition(command)
+  const hook = definition?.hooks?.[0]
+  if (!definition?.matcher || !hook?.command) {
+    return null
+  }
+  return computeCodexTrustedHash({
+    sourcePath: '',
+    eventLabel: 'pre_tool_use',
+    groupIndex: 1,
+    handlerIndex: 0,
+    command: hook.command,
+    timeoutSec: hook.timeout,
+    matcher: definition.matcher
+  })
 }
 
 export type CodexManagedHookInstallMaterial = {

@@ -46,6 +46,7 @@ import {
   SelectCodexAccountForTargetParams,
   SelectDataAccountParams
 } from './accounts-params'
+import { AgentCheckpointApplyParams, AgentCheckpointContextParams } from './agent-checkpoint-params'
 import { PrepareCodexForWslPaneParams } from './agent-hooks-params'
 import { AgentLaunch, AgentLaunchReplay } from './agent-launch-params'
 import { AgentLaunchSettingsMutation } from './agent-launch-settings-params'
@@ -646,6 +647,8 @@ export const RPC_PARAMS_BY_METHOD = {
   'accounts.unsubscribe': AccountsUnsubscribeParams,
   'agent.launch': AgentLaunch,
   'agent.launchReplay': AgentLaunchReplay,
+  'agentHooks.checkpointApply': AgentCheckpointApplyParams,
+  'agentHooks.checkpointContext': AgentCheckpointContextParams,
   'agentHooks.prepareCodexForWslPane': PrepareCodexForWslPaneParams,
   'agentSession.acknowledgeAttention': AcknowledgeAttentionParams,
   'agentSession.agents': AgentsParams,

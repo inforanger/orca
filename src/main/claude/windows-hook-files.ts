@@ -83,11 +83,15 @@ export function getWindowsClaudeHookEntry(): string {
     `set "ORCA_CLAUDE_HOOK_IMPL=%~dp0${PAYLOAD_FILE_NAME}"`,
     'if not exist "%ORCA_CLAUDE_HOOK_IMPL%" goto :missing_impl',
     // Transfer control without CALL's second expansion of percent signs in the path.
-    // A payload that exists but cannot start (locked, quarantined) falls through to the neutral reply.
     '"%ORCA_CLAUDE_HOOK_IMPL%"',
+    'if errorlevel 1 goto :missing_impl',
+    'exit /b 0',
     ':missing_impl',
-    'echo {}',
-    ...buildWindowsHookEnvironmentGuardLines(),
+    'if not defined ORCA_PANE_KEY exit /b 0',
+    'echo {"systemMessage":"ORCA CHECKPOINT DELIVERY ERROR: the managed Claude hook implementation is missing or could not start."}',
+    ...buildWindowsHookEnvironmentGuardLines(
+      '{"systemMessage":"ORCA CHECKPOINT DELIVERY ERROR: the authenticated Orca hook endpoint is unavailable."}'
+    ),
     WINDOWS_CLAUDE_BACKGROUND_JOB_GUARD,
     ...buildWindowsHookStdinDrainEpilogue(),
     ''

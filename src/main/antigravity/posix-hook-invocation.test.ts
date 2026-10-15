@@ -110,7 +110,7 @@ describe.skipIf(process.platform === 'win32')('Antigravity POSIX hook executable
         ORCA_PANE_KEY: 'test-pane'
       })
       expect(result.code).toBe(0)
-      expect(result.stdout).toBe('{"decision":"ask"}')
+      expect(result.stdout).toBe('{}\n')
       expect(result.elapsedMs).toBeLessThan(8000)
       expect(posts).toHaveLength(1)
       expect(posts[0]?.get('payload')).toBe(payload)
@@ -130,7 +130,7 @@ describe.skipIf(process.platform === 'win32')('Antigravity POSIX hook executable
       ORCA_PANE_KEY: ''
     })
     expect(result.code).toBe(0)
-    expect(result.stdout).toBe('{}')
+    expect(result.stdout).toContain('ORCA CHECKPOINT DELIVERY ERROR')
     expect(result.elapsedMs).toBeLessThan(8000)
   }, 10000)
 })

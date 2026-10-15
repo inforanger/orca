@@ -147,14 +147,18 @@ function collectMirroredRuntimeUserHookTrustEntries(
 /** Shifts mirrored user approvals one group down in each event Orca's entry leads. */
 export function moveMirroredRuntimeUserTrustAfterManagedStatusHook(
   entries: readonly MirroredRuntimeUserHookTrustEntry[],
-  statusHookLabels: ReadonlySet<CodexEventLabel>
+  statusHookLabels: ReadonlySet<CodexEventLabel>,
+  managedGroupOffsets: Partial<Record<CodexEventLabel, number>> = {}
 ): MirroredRuntimeUserHookTrustEntry[] {
   return entries.map(({ entry, enabled }) => {
     if (!statusHookLabels.has(entry.eventLabel)) {
       return { entry, enabled }
     }
     return {
-      entry: { ...entry, groupIndex: entry.groupIndex + 1 },
+      entry: {
+        ...entry,
+        groupIndex: entry.groupIndex + (managedGroupOffsets[entry.eventLabel] ?? 1)
+      },
       enabled
     }
   })

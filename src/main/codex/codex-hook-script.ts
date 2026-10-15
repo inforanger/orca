@@ -6,16 +6,33 @@ import {
   buildWindowsHookStdinDrainEpilogue
 } from '../agent-hooks/hook-stdin-contract'
 import { buildWindowsAgentHookCurlPostCommand } from '../agent-hooks/installer-utils'
+import { getAgentCheckpointUnavailableDecision } from '../agent-checkpoint/agent-checkpoint-tool-policy'
 
-export function getManagedScript(target: 'local' | 'posix' = 'local'): string {
+export function getManagedScript(
+  target: 'local' | 'posix' = 'local',
+  options: { checkpointGate?: boolean } = {}
+): string {
+  const unavailableDecision = getAgentCheckpointUnavailableDecision('codex')
   if (target === 'local' && process.platform === 'win32') {
     return [
       '@echo off',
       'setlocal',
       // Why: the endpoint file holds this install's live port/token; sourcing it lets a surviving PTY reach the current server (see claude/hook-service.ts).
       'if defined ORCA_AGENT_HOOK_ENDPOINT if exist "%ORCA_AGENT_HOOK_ENDPOINT%" call "%ORCA_AGENT_HOOK_ENDPOINT%" 2>nul',
-      ...buildWindowsHookEnvironmentGuardLines(),
-      buildWindowsAgentHookCurlPostCommand('codex'),
+      ...buildWindowsHookEnvironmentGuardLines(
+        options.checkpointGate
+          ? unavailableDecision
+          : '{"systemMessage":"ORCA CHECKPOINT DELIVERY ERROR: the authenticated Orca hook endpoint is unavailable; checkpoint text was not delivered and this fallback does not block mutations."}'
+      ),
+      ...(options.checkpointGate ? ['set "ORCA_AGENT_HOOK_ROLE=checkpoint"'] : []),
+      buildWindowsAgentHookCurlPostCommand('codex', {
+        outputResponse: true,
+        failOnHttpError: true,
+        ...(options.checkpointGate ? { hookRole: 'checkpoint' as const } : {})
+      }),
+      ...(options.checkpointGate
+        ? [`if errorlevel 1 echo ${unavailableDecision}`]
+        : ['if errorlevel 1 echo {"systemMessage":"ORCA CHECKPOINT DELIVERY ERROR: the authenticated Orca hook endpoint did not respond; checkpoint text was not delivered and this fallback does not block mutations."}']),
       'exit /b 0',
       ...buildWindowsHookStdinDrainEpilogue(),
       ''
@@ -24,6 +41,7 @@ export function getManagedScript(target: 'local' | 'posix' = 'local'): string {
 
   return [
     '#!/bin/sh',
+    ...(options.checkpointGate ? ['ORCA_AGENT_HOOK_ROLE=checkpoint'] : []),
     ...buildPosixHookPayloadCapture(),
     ...buildPosixHookSpoolLines('codex'),
     // Why: sourcing refreshes PORT/TOKEN/ENV/VERSION from the current Orca so a surviving PTY keeps reporting after a restart (see claude/hook-service.ts).
@@ -54,7 +72,12 @@ export function getManagedScript(target: 'local' | 'posix' = 'local'): string {
     '  load_hook_endpoint "$ORCA_AGENT_HOOK_ENDPOINT"',
     'fi',
     'if [ -z "$ORCA_AGENT_HOOK_PORT" ] || [ -z "$ORCA_AGENT_HOOK_TOKEN" ] || [ -z "$ORCA_PANE_KEY" ]; then',
-    '  spool_hook_event',
+    '  if [ -n "$ORCA_PANE_KEY" ] && [ -n "$ORCA_AGENT_HOOK_ENDPOINT" ] && [ -r "$ORCA_AGENT_HOOK_ENDPOINT" ]; then',
+    ...(options.checkpointGate
+      ? [`    printf '%s\\n' '${unavailableDecision}'`]
+      : ['    printf \'%s\\n\' \'{"systemMessage":"ORCA CHECKPOINT DELIVERY ERROR: the authenticated Orca hook endpoint is unavailable; checkpoint text was not delivered and this fallback does not block mutations."}\'']),
+    '    spool_hook_event',
+    '  fi',
     '  exit 0',
     'fi',
     'post_codex_hook() {',
@@ -64,25 +87,32 @@ export function getManagedScript(target: 'local' | 'posix' = 'local'): string {
     // Why: keep full hook JSON off the command line and avoid URL-encoding paths/commands into IDS-friendly traversal signatures.
     ...buildPosixAgentHookPostCommand('codex', {
       curlCommand: '"$curl_bin"',
-      indent: '    '
+      indent: '    ',
+      failOnHttpError: true,
+      ...(options.checkpointGate ? { hookRole: 'checkpoint' as const } : {})
     }).map((line) => `  ${line}`),
     '}',
     'is_wsl_runtime() {',
     '  [ -n "$WSL_DISTRO_NAME" ] && return 0',
     '  grep -qiE "microsoft|wsl" /proc/sys/kernel/osrelease /proc/version 2>/dev/null',
     '}',
-    'if post_codex_hook curl >/dev/null 2>&1; then',
+    'if response=$(post_codex_hook curl 2>/dev/null); then',
+    '  [ -z "$response" ] || printf \'%s\\n\' "$response"',
     '  exit 0',
     'fi',
     'if is_wsl_runtime; then',
     '  windows_curl=$(command -v curl.exe 2>/dev/null || true)',
     '  if [ -n "$windows_curl" ] && [ -x "$windows_curl" ]; then',
-    '    if post_codex_hook "$windows_curl" 3 5 >/dev/null 2>&1; then',
+    '    if response=$(post_codex_hook "$windows_curl" 3 5 2>/dev/null); then',
+    '      [ -z "$response" ] || printf \'%s\\n\' "$response"',
     '      exit 0',
     '    fi',
     '    # post_codex_hook "$windows_curl" 3 5 >/dev/null 2>&1 || true',
     '  fi',
     'fi',
+    ...(options.checkpointGate
+      ? [`printf '%s\\n' '${unavailableDecision}'`]
+      : ['printf \'%s\\n\' \'{"systemMessage":"ORCA CHECKPOINT DELIVERY ERROR: the authenticated Orca hook endpoint did not respond; checkpoint text was not delivered and this fallback does not block mutations."}\'']),
     'spool_hook_event',
     'exit 0',
     ''

@@ -68,16 +68,23 @@ async function startHookListener(): Promise<{
     })
     req.on('end', () => {
       const form = new URLSearchParams(body)
+      const hookEventName = form.get('hook_event_name')
       posts.push({
         payload: form.get('payload'),
         paneKey: form.get('paneKey'),
         worktreeId: form.get('worktreeId'),
-        hookEventName: form.get('hook_event_name'),
+        hookEventName,
         token: (req.headers['x-orca-agent-hook-token'] as string | undefined) ?? null,
         contentType: (req.headers['content-type'] as string | undefined) ?? null
       })
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end('{}')
+      res.end(
+        hookEventName === 'PreToolUse'
+          ? ANTIGRAVITY_PRE_TOOL_USE_DECISION
+          : hookEventName === 'Stop'
+            ? '{"decision":""}'
+            : '{}'
+      )
     })
   })
   const port = await new Promise<number>((resolve) => {
@@ -160,7 +167,17 @@ function expectedStdout(eventName: string): string {
   if (eventName === 'PreToolUse') {
     return ANTIGRAVITY_PRE_TOOL_USE_DECISION
   }
+  if (eventName === 'Stop') {
+    return '{"decision":""}'
+  }
   return eventName === 'Stop' ? '{"decision":""}' : '{}'
+}
+
+function expectedMissingCoreStdout(eventName: string): string {
+  if (eventName === 'SessionStart' || eventName === 'PreInvocation') {
+    return '{"injectSteps":[{"ephemeralMessage":"ORCA CHECKPOINT DELIVERY ERROR: managed Antigravity hook script is missing; checkpoint text was not delivered."}]}'
+  }
+  return expectedStdout(eventName)
 }
 
 // Why: runs on every platform — the live delivery suite below is Windows-only, so this
@@ -350,7 +367,7 @@ describe.skipIf(process.platform !== 'win32')('Antigravity Windows hook payload 
         const result = await runWrapper(join(hooksDir, event.windowsWrapperFileName), env, null)
         expect(result.timedOut, event.eventName).toBe(false)
         expect(result.exitCode, event.eventName).toBe(0)
-        expect(result.stdout.trim(), event.eventName).toBe(expectedStdout(event.eventName))
+        expect(result.stdout.trim(), event.eventName).toBe(expectedMissingCoreStdout(event.eventName))
         expect(result.stderr, event.eventName).toBe('')
       }
       expect(listener.posts).toHaveLength(0)
@@ -379,7 +396,7 @@ describe.skipIf(process.platform !== 'win32')('Antigravity Windows hook payload 
       )
       expect(result.timedOut, event.eventName).toBe(false)
       expect(result.exitCode, event.eventName).toBe(0)
-      expect(result.stdout.trim(), event.eventName).toBe(expectedStdout(event.eventName))
+      expect(result.stdout.trim(), event.eventName).toBe(expectedMissingCoreStdout(event.eventName))
       expect(result.stderr, event.eventName).toBe('')
     }
     // Why: the fallback answers the agent but has no core to post through.

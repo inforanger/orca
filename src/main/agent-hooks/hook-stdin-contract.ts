@@ -185,8 +185,20 @@ const WINDOWS_HOOK_ENVIRONMENT_VARS = [
 // PowerShell launchers that own stdin themselves when the managed script is missing.
 // POSIX hooks keep capture-first: their callers close stdin, and exiting mid-write there
 // surfaces as EPIPE the agent can see (#8110).
-export function buildWindowsHookEnvironmentGuardLines(): string[] {
-  return WINDOWS_HOOK_ENVIRONMENT_VARS.map((name) => `if "%${name}%"=="" exit /b 0`)
+export function buildWindowsHookEnvironmentGuardLines(fallbackStdout?: string): string[] {
+  if (fallbackStdout) {
+    return [
+      'if "%ORCA_PANE_KEY%"=="" exit /b 0',
+      'if not defined ORCA_AGENT_HOOK_ENDPOINT exit /b 0',
+      'if not exist "%ORCA_AGENT_HOOK_ENDPOINT%" exit /b 0',
+      ...WINDOWS_HOOK_ENVIRONMENT_VARS.map((name) =>
+        `if "%${name}%"=="" (echo ${fallbackStdout}& exit /b 0)`
+      )
+    ]
+  }
+  return WINDOWS_HOOK_ENVIRONMENT_VARS.map((name) =>
+    `if "%${name}%"=="" exit /b 0`
+  )
 }
 
 /** The same guard in sh, for the Git Bash hooks and launchers that run on Windows.

@@ -45,9 +45,11 @@ describe('Windows Claude hook files', () => {
     expect(service.install().state).toBe('installed')
     expect(readFileSync(entry, 'utf8')).toBe(getWindowsClaudeHookEntry())
     const body = readFileSync(payload, 'utf8')
-    expect(body.indexOf('echo {}')).toBeLessThan(body.indexOf('curl.exe'))
+    expect(body).not.toContain('echo {}')
     expect(body).toContain('--connect-timeout 0.5 --max-time 1.5')
-    expect(body).toContain('--data-urlencode "payload@-" >nul 2>&1\r\nexit /b 0')
+    expect(body).toContain(
+      '--data-urlencode "payload@-"\r\nif errorlevel 1 echo {"systemMessage":"ORCA CHECKPOINT DELIVERY ERROR: the authenticated Orca hook endpoint did not respond; checkpoint text was not delivered and this fallback does not block mutations."}'
+    )
     expect(body).toContain('DEVIN_PROJECT_DIR')
   })
 

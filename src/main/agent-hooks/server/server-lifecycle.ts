@@ -15,6 +15,7 @@ import { clearAllListenerCaches } from '../../../shared/agent-hook-listener/list
 import { trackEmptyPaneKeyHook } from './server-transport-rules'
 import { AgentHookServerStatusHookLifecycle } from './server-status-hook-lifecycle'
 import { OPENCODE_STARTUP_PROMPT_CLAIM_PATH } from '../../../shared/opencode-startup-prompt'
+import { createAgentCheckpointHookResponse } from '../../agent-checkpoint/agent-checkpoint-hook-response'
 
 export abstract class AgentHookServerLifecycle extends AgentHookServerStatusHookLifecycle {
   /** Start the loopback listener after hydration and spool replay have settled. */
@@ -102,9 +103,17 @@ export abstract class AgentHookServerLifecycle extends AgentHookServerStatusHook
         const hookBody = mergeAgentHookRequestHeaders(body, req.headers)
         trackEmptyPaneKeyHook(hookBody)
         const aliasedBody = this.normalizeHookBodyPaneKeyAlias(hookBody)
-        if (await this.ingestTmuxHook(source, aliasedBody)) {
-          res.writeHead(204)
-          res.end()
+        const checkpointGateOnly = hasCheckpointGateRole(aliasedBody)
+        const checkpointResponse = await createAgentCheckpointHookResponse({
+          source,
+          body: aliasedBody
+        })
+        if (!checkpointGateOnly && (await this.ingestTmuxHook(source, aliasedBody))) {
+          writeCheckpointHookResponse(res, checkpointResponse)
+          return
+        }
+        if (checkpointGateOnly) {
+          writeCheckpointHookResponse(res, checkpointResponse)
           return
         }
         const normalized = this.normalizeLocalHookPayload(source, aliasedBody)
@@ -148,8 +157,7 @@ export abstract class AgentHookServerLifecycle extends AgentHookServerStatusHook
             this.scheduleTranscriptPoll(source, aliasedBody, enriched)
           }
         }
-        res.writeHead(204)
-        res.end()
+        writeCheckpointHookResponse(res, checkpointResponse)
       } catch (error) {
         if (pathname === OPENCODE_STARTUP_PROMPT_CLAIM_PATH) {
           if (isHookRequestTruncatedError(error) && !destroyedBySlowlorisCap) {
@@ -276,4 +284,27 @@ export abstract class AgentHookServerLifecycle extends AgentHookServerStatusHook
     this.enrichedStatusListeners.clear()
     this.statusRowMutationListeners.clear()
   }
+}
+
+function writeCheckpointHookResponse(
+  response: ServerResponse,
+  checkpointResponse: Awaited<ReturnType<typeof createAgentCheckpointHookResponse>>
+): void {
+  if (!checkpointResponse) {
+    response.writeHead(204)
+    response.end()
+    return
+  }
+  response.writeHead(checkpointResponse.statusCode, { 'content-type': 'application/json' })
+  response.end(checkpointResponse.body)
+}
+
+function hasCheckpointGateRole(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    'hookRole' in value &&
+    value.hookRole === 'checkpoint'
+  )
 }

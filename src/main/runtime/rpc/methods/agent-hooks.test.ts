@@ -2,17 +2,19 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import { eraseRpcMethods, isStreamingMethod, type RpcContext } from '../core'
 
-const { installForRuntimeHomeSerializedMock, realpathMock } = vi.hoisted(() => ({
+const { installForRuntimeHomeSerializedMock, realpathMock, readFileMock } = vi.hoisted(() => ({
   installForRuntimeHomeSerializedMock: vi.fn(),
-  realpathMock: vi.fn()
+  realpathMock: vi.fn(),
+  readFileMock: vi.fn()
 }))
 
 vi.mock('../../../codex/hook-service', () => ({
   codexHookService: { installForRuntimeHomeSerialized: installForRuntimeHomeSerializedMock }
 }))
-vi.mock('node:fs/promises', () => ({ realpath: realpathMock }))
+vi.mock('node:fs/promises', () => ({ realpath: realpathMock, readFile: readFileMock }))
 
 import { AGENT_HOOK_METHODS } from './agent-hooks'
+import { agentCheckpointReadiness } from '../../../agent-checkpoint/agent-checkpoint-readiness'
 import {
   _internals as managedWslHomeRegistryInternals,
   recordManagedWslCodexHome
@@ -32,6 +34,14 @@ function prepareMethod() {
   return method
 }
 
+function checkpointMethod(name: string) {
+  const method = eraseRpcMethods(AGENT_HOOK_METHODS).find((candidate) => candidate.name === name)
+  if (!method || isStreamingMethod(method)) {
+    throw new Error(`Missing ${name} request method`)
+  }
+  return method
+}
+
 function runtimeWithSettings(enabled = true, disabledTuiAgents: string[] = []): OrcaRuntimeService {
   return {
     getClientSettings: vi.fn(() => ({
@@ -46,6 +56,9 @@ describe('agent hook RPC methods', () => {
     installForRuntimeHomeSerializedMock.mockReset()
     realpathMock.mockReset()
     realpathMock.mockImplementation(async (path: string) => path)
+    readFileMock.mockReset()
+    readFileMock.mockResolvedValue('# CHECKPOINT\nRead the whole canonical file.\n')
+    agentCheckpointReadiness.clearAll()
     managedWslHomeRegistryInternals.clearRecordedManagedWslCodexHomes()
     recordManagedWslCodexHome('Ubuntu-24.04', RUNTIME_HOME)
   })
@@ -141,5 +154,76 @@ describe('agent hook RPC methods', () => {
         wslDistro: 'Ubuntu\\..\\host'
       })
     ).toThrow()
+  })
+
+  it('registers the current document and returns its verbatim task context over RPC', async () => {
+    const method = checkpointMethod('agentHooks.checkpointContext')
+    const params = method.params!.parse({
+      paneKey: 'tab-1:pane-1',
+      launchToken: 'launch-1',
+      taskId: 'task-1',
+      taskSummary: 'Fix checkpoint enforcement'
+    })
+
+    await expect(method.handler(params, { runtime: runtimeWithSettings() })).resolves.toMatchObject({
+      taskId: 'task-1',
+      context: expect.stringContaining('# CHECKPOINT\nRead the whole canonical file.\n')
+    })
+    expect(readFileMock).toHaveBeenCalledOnce()
+  })
+
+  it('accepts a complete task record only through the current session identity', async () => {
+    const context = checkpointMethod('agentHooks.checkpointContext')
+    const contextParams = context.params!.parse({
+      paneKey: 'tab-1:pane-1',
+      launchToken: 'launch-1',
+      taskId: 'task-1',
+      taskSummary: 'Fix checkpoint enforcement'
+    })
+    const current = await context.handler(contextParams, { runtime: runtimeWithSettings() })
+    if (typeof current !== 'object' || current === null || !('checkpointSha256' in current)) {
+      throw new Error('Checkpoint context did not return its source hash')
+    }
+    const application = {
+      checkpointSha256: current.checkpointSha256,
+      taskId: 'task-1',
+      taskSummary: 'Fix checkpoint enforcement',
+      lessonsSearch: 'Searched and applied the relevant hook lessons.',
+      why: ['Launch omits context.', 'Hooks do not gate tools.', 'A shared source is needed.'],
+      approachA: {
+        method: 'Append a reminder.',
+        workload: 'Small',
+        remainingProblem: 'No task-bound gate.'
+      },
+      approachB: {
+        method: 'Read and validate the canonical source.',
+        workload: 'Several adapters',
+        solvedProblem: 'Supported writes wait for analysis.',
+        feasible: true,
+        infeasibleReason: ''
+      },
+      userRequestedApproachA: false,
+      selectedApproach: 'B',
+      selectionReason: 'This closes the shared lifecycle gap.',
+      rootCause: 'Delivery and hook decisions are disconnected.',
+      resolution: 'Use the shared checkpoint readiness state.',
+      verification: 'Exercise launch, resume, dispatch and hooks.',
+      reuseCheck: 'Extend existing CLI and hook transports.',
+      architectureCheck: 'Keep one source and readiness owner.',
+      errorPatternReview: 'Search existing launch and hook patterns.',
+      shortcutReview: 'No delays or swallowed errors.'
+    }
+    const apply = checkpointMethod('agentHooks.checkpointApply')
+
+    await expect(
+      apply.handler(
+        apply.params!.parse({
+          paneKey: 'tab-1:pane-1',
+          launchToken: 'launch-1',
+          application
+        }),
+        { runtime: runtimeWithSettings() }
+      )
+    ).resolves.toEqual({ accepted: true })
   })
 })

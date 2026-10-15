@@ -83,6 +83,22 @@ export function getManagedScriptPath(settings = CLAUDE_HOOK_SETTINGS): string {
   return getSharedManagedScriptPath(getManagedScriptFileName(settings))
 }
 
+export function getCheckpointGateScriptPath(settings = CLAUDE_HOOK_SETTINGS): string {
+  return getSharedManagedScriptPath(getCheckpointGateScriptFileName(settings))
+}
+
+export function getCheckpointGateScriptFileName(settings = CLAUDE_HOOK_SETTINGS): string {
+  const extension = process.platform === 'win32' ? 'cmd' : 'sh'
+  return `${settings.scriptBaseName}-checkpoint-gate.${extension}`
+}
+
+export function getCheckpointGateEventHook(
+  scriptPath: string
+): HookCommandConfig {
+  const scriptBaseName = getScriptBaseName(scriptPath)
+  return buildManagedCommandHook(wrapRuntimeHomeHookCommand(scriptBaseName))
+}
+
 export function getRemoteConfigPath(remoteHome: string, settings = CLAUDE_HOOK_SETTINGS): string {
   return `${remoteHome.replace(/\/$/, '')}/${settings.configDirName}/settings.json`
 }
@@ -218,10 +234,16 @@ export function applyManagedHooks(
   config: HooksConfig,
   hookForEvent: (eventName: string) => HookCommandConfig,
   scriptFileName: string,
-  plan: ClaudeManagedHookPlan
+  plan: ClaudeManagedHookPlan,
+  checkpointGate?: { matcher: string; hook: HookCommandConfig; scriptFileName: string }
 ): HooksConfig {
   const nextHooks = { ...config.hooks }
-  const isManagedCommand = createManagedCommandMatcher(scriptFileName)
+  const isPrimaryManagedCommand = createManagedCommandMatcher(scriptFileName)
+  const isCheckpointGateManagedCommand = checkpointGate
+    ? createManagedCommandMatcher(checkpointGate.scriptFileName)
+    : null
+  const isManagedCommand = (command: string | undefined): boolean =>
+    isPrimaryManagedCommand(command) || (isCheckpointGateManagedCommand?.(command) ?? false)
 
   for (const event of plan.install) {
     const current = nextHooks[event.eventName]
@@ -230,7 +252,11 @@ export function applyManagedHooks(
       ...event.definition,
       hooks: [hookForEvent(event.eventName)]
     }
-    nextHooks[event.eventName] = [...cleaned, definition]
+    const installed = [...cleaned, definition]
+    if (event.eventName === 'PreToolUse' && checkpointGate) {
+      installed.push({ matcher: checkpointGate.matcher, hooks: [checkpointGate.hook] })
+    }
+    nextHooks[event.eventName] = installed
   }
 
   for (const event of plan.retire) {
@@ -303,13 +329,19 @@ export function removeManagedStatusLine(
 
 export function removeManagedHooks(
   config: HooksConfig,
-  scriptFileName = getManagedScriptFileName()
+  scriptFileName = getManagedScriptFileName(),
+  checkpointGateScriptFileName?: string
 ): {
   config: HooksConfig
   changed: boolean
 } {
   const nextHooks = { ...config.hooks }
-  const isManagedCommand = createManagedCommandMatcher(scriptFileName)
+  const isPrimaryManagedCommand = createManagedCommandMatcher(scriptFileName)
+  const isCheckpointGateManagedCommand = checkpointGateScriptFileName
+    ? createManagedCommandMatcher(checkpointGateScriptFileName)
+    : null
+  const isManagedCommand = (command: string | undefined): boolean =>
+    isPrimaryManagedCommand(command) || (isCheckpointGateManagedCommand?.(command) ?? false)
   let changed = false
 
   for (const [eventName, definitions] of Object.entries(nextHooks)) {

@@ -20,18 +20,24 @@ import { tokenizeCommandLine } from '../../shared/agent-command-line-entrypoint'
 import { AntigravityHookService } from './hook-service'
 import { POSIX_HOOK_JSON_STDIN_READER } from '../agent-hooks/hook-stdin-contract'
 import { createManagedCommandMatcher } from '../agent-hooks/installer-utils'
+import {
+  ANTIGRAVITY_CHECKPOINT_GATE_WRAPPER_FILE_NAME,
+  ANTIGRAVITY_PRE_TOOL_USE_DECISION
+} from './hook-events'
+import { getAgentCheckpointToolMatcher } from '../agent-checkpoint/agent-checkpoint-tool-policy'
 
 const ANTIGRAVITY_SCRIPT_FILE_NAME =
   process.platform === 'win32' ? 'antigravity-hook.cmd' : 'antigravity-hook.sh'
 const ANTIGRAVITY_PRE_INVOCATION_COMMAND =
   process.platform === 'win32' ? 'antigravity-pre-invocation.cmd' : 'antigravity-hook.sh'
+const ANTIGRAVITY_SESSION_START_COMMAND =
+  process.platform === 'win32' ? 'antigravity-session-start.cmd' : 'antigravity-hook.sh'
 const ANTIGRAVITY_POST_TOOL_USE_COMMAND =
   process.platform === 'win32' ? 'antigravity-post-tool-use.cmd' : 'antigravity-hook.sh'
 const ANTIGRAVITY_PRE_TOOL_USE_COMMAND =
   process.platform === 'win32' ? 'antigravity-pre-tool-use.cmd' : 'antigravity-hook.sh'
-// Why: the gate decision Orca is allowed to emit — "allow" would auto-approve every observed tool call.
-const PRE_TOOL_USE_DECISION = '{"decision":"ask"}'
-const POLICY_OVERRIDING_DECISIONS = ['allow', 'deny', 'force_ask', 'deny_unless_prior_grant']
+const PRE_TOOL_USE_DECISION = ANTIGRAVITY_PRE_TOOL_USE_DECISION
+const UNSUPPORTED_POLICY_DECISIONS = ['force_ask', 'deny_unless_prior_grant']
 
 function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
   const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
@@ -74,7 +80,7 @@ describe('AntigravityHookService', () => {
       >
     }
     expect(Object.keys(config['orca-status']).sort()).toEqual(
-      ['PostInvocation', 'PostToolUse', 'PreInvocation', 'PreToolUse', 'Stop'].sort()
+      ['PostInvocation', 'PostToolUse', 'PreInvocation', 'PreToolUse', 'SessionStart', 'Stop'].sort()
     )
     expect(config['orca-status'].PreToolUse[0].matcher).toBe('*')
     expect(config['orca-status'].PreToolUse[0].hooks?.[0]?.command).toContain(
@@ -84,12 +90,19 @@ describe('AntigravityHookService', () => {
     expect(config['orca-status'].PreInvocation[0].command).toContain(
       ANTIGRAVITY_PRE_INVOCATION_COMMAND
     )
+    expect(config['orca-status'].SessionStart[0].command).toContain(
+      ANTIGRAVITY_SESSION_START_COMMAND
+    )
     if (process.platform === 'win32') {
       expect(config['orca-status'].PreInvocation[0].command).not.toContain('ORCA_ANTIGRAVITY_EVENT')
+      expect(config['orca-status'].SessionStart[0].command).not.toContain('ORCA_ANTIGRAVITY_EVENT')
     } else {
       expect(
         tokenizeCommandLine(config['orca-status'].PreInvocation[0].command ?? '')[2]
       ).toContain("ORCA_ANTIGRAVITY_EVENT='PreInvocation'")
+      expect(tokenizeCommandLine(config['orca-status'].SessionStart[0].command ?? '')[2]).toContain(
+        "ORCA_ANTIGRAVITY_EVENT='SessionStart'"
+      )
       expect(tokenizeCommandLine(config['orca-status'].Stop[0].command ?? '')[2]).toContain(
         "ORCA_ANTIGRAVITY_EVENT='Stop'"
       )
@@ -121,15 +134,27 @@ describe('AntigravityHookService', () => {
       expect(script).toContain('--data-urlencode "payload@-"')
       expect(script).not.toContain('--data-urlencode "payload=${payload}"')
     }
-    expect(script).toContain('{"decision":""}')
+    if (process.platform === 'win32') {
+      const postScript = readFileSync(
+        join(homeDir, '.orca', 'agent-hooks', 'antigravity-hook-post.cjs'),
+        'utf8'
+      )
+      expect(postScript).toContain('{"decision":""}')
+    } else {
+      expect(script).toContain('Stop) printf')
+    }
     expect(script).toContain(PRE_TOOL_USE_DECISION)
-    for (const decision of POLICY_OVERRIDING_DECISIONS) {
+    expect(script).toContain('"decision":"deny"')
+    expect(script).toContain(
+      'ORCA CHECKPOINT DELIVERY ERROR: the authenticated hook endpoint is unavailable; this classified tool is blocked until checkpoint readiness can be verified.'
+    )
+    for (const decision of UNSUPPORTED_POLICY_DECISIONS) {
       expect(script).not.toContain(`{"decision":"${decision}"}`)
     }
   })
 
   it.skipIf(process.platform === 'win32')(
-    'answers the PreToolUse gate with ask so the hook never decides tool permissions',
+    'reports unsupported checkpoint enforcement through the PreToolUse ask fallback',
     () => {
       new AntigravityHookService().install()
 
@@ -179,7 +204,7 @@ describe('AntigravityHookService', () => {
   )
 
   it.skipIf(process.platform === 'win32')(
-    'leaves non-gate Antigravity events silent when the managed script is missing',
+    'reports missing context delivery on context hooks when the managed script is missing',
     () => {
       new AntigravityHookService().install()
       rmSync(join(homeDir, '.orca', 'agent-hooks'), { recursive: true, force: true })
@@ -191,12 +216,31 @@ describe('AntigravityHookService', () => {
       }
       const postToolUse = config['orca-status'].PostToolUse[0].hooks?.[0]?.command
       const preInvocation = config['orca-status'].PreInvocation[0].command
+      const sessionStart = config['orca-status'].SessionStart[0].command
 
-      for (const command of [postToolUse, preInvocation]) {
-        const result = spawnSync('/bin/sh', ['-c', command!], { input: '{}', encoding: 'utf8' })
-        expect(result.status).toBe(0)
-        expect(result.stdout).toBe('')
-      }
+      const postToolResult = spawnSync('/bin/sh', ['-c', postToolUse!], {
+        input: '{}',
+        encoding: 'utf8'
+      })
+      expect(postToolResult.status).toBe(0)
+      expect(postToolResult.stdout).toBe('')
+      const preInvocationResult = spawnSync('/bin/sh', ['-c', preInvocation!], {
+        input: '{}',
+        env: { ...process.env, ORCA_PANE_KEY: 'test-pane' },
+        encoding: 'utf8'
+      })
+      expect(preInvocationResult.status).toBe(0)
+      expect(preInvocationResult.stdout).toContain('"ephemeralMessage"')
+      expect(preInvocationResult.stdout).toContain('ORCA CHECKPOINT DELIVERY ERROR')
+
+      const sessionStartResult = spawnSync('/bin/sh', ['-c', sessionStart!], {
+        input: '{}',
+        env: { ...process.env, ORCA_PANE_KEY: 'test-pane' },
+        encoding: 'utf8'
+      })
+      expect(sessionStartResult.status).toBe(0)
+      expect(sessionStartResult.stdout).toContain('"ephemeralMessage"')
+      expect(sessionStartResult.stdout).toContain('ORCA CHECKPOINT DELIVERY ERROR')
     }
   )
 
@@ -248,9 +292,14 @@ describe('AntigravityHookService', () => {
           { matcher?: string; command?: string; hooks?: { command: string }[] }[]
         >
       }
-      expect(config['orca-status'].PreToolUse).toHaveLength(1)
+      expect(config['orca-status'].PreToolUse).toHaveLength(2)
+      expect(config['orca-status'].PreToolUse[0].matcher).toBe('*')
+      expect(config['orca-status'].PreToolUse[1].matcher).toBe(
+        getAgentCheckpointToolMatcher('antigravity')
+      )
 
       const expectedWrappers = {
+        SessionStart: 'antigravity-session-start.cmd',
         PreInvocation: 'antigravity-pre-invocation.cmd',
         PostInvocation: 'antigravity-post-invocation.cmd',
         Stop: 'antigravity-stop.cmd',
@@ -269,14 +318,22 @@ describe('AntigravityHookService', () => {
         const wrapper = readFileSync(join(homeDir, '.orca', 'agent-hooks', wrapperFileName), 'utf8')
         expect(wrapper).toContain(`set "ORCA_ANTIGRAVITY_EVENT=${eventName}"`)
         expect(wrapper).toContain('call "%ORCA_ANTIGRAVITY_CORE%"')
-        // Why: the wrapper is the stdin owner when the core script is gone, so it must answer the gate itself.
+        // Why: the wrapper is the stdin owner when the core script is gone, so preserve its normal ask decision.
         if (eventName === 'PreToolUse') {
           expect(wrapper).toContain(`echo ${PRE_TOOL_USE_DECISION}`)
         }
-        for (const decision of POLICY_OVERRIDING_DECISIONS) {
+        for (const decision of UNSUPPORTED_POLICY_DECISIONS) {
           expect(wrapper).not.toContain(`{"decision":"${decision}"}`)
         }
       }
+
+      const checkpointGateWrapper = readFileSync(
+        join(homeDir, '.orca', 'agent-hooks', ANTIGRAVITY_CHECKPOINT_GATE_WRAPPER_FILE_NAME),
+        'utf8'
+      )
+      expect(checkpointGateWrapper).toContain(
+        'echo {"decision":"deny","reason":"ORCA CHECKPOINT DELIVERY ERROR:'
+      )
 
       const script = readFileSync(
         join(homeDir, '.orca', 'agent-hooks', 'antigravity-hook.cmd'),
@@ -396,18 +453,28 @@ describe('AntigravityHookService', () => {
     new AntigravityHookService().install()
 
     const config = JSON.parse(readFileSync(configPath, 'utf8')) as {
-      'orca-status': Record<string, { command?: string; hooks?: { command: string }[] }[]>
+      'orca-status': Record<
+        string,
+        { matcher?: string; command?: string; hooks?: { command: string }[] }[]
+      >
     }
     expect(config['orca-status'].OldEvent).toBeUndefined()
     // Why: the pre-a480e6b7 PreToolUse entry pointed at a script with no gate branch; it must be replaced, not kept.
     const preToolCommands = config['orca-status'].PreToolUse.flatMap((definition) =>
       (definition.hooks ?? []).map((hook) => hook.command)
     )
-    expect(preToolCommands).toHaveLength(1)
-    expect(preToolCommands[0]).toContain(
+    expect(preToolCommands).toHaveLength(2)
+    const statusPreTool = config['orca-status'].PreToolUse.find(
+      (definition) => definition.matcher === '*'
+    )
+    const checkpointPreTool = config['orca-status'].PreToolUse.find(
+      (definition) => definition.matcher !== '*'
+    )
+    expect(statusPreTool?.hooks?.[0]?.command).toContain(
       join(homeDir, '.orca', 'agent-hooks', ANTIGRAVITY_PRE_TOOL_USE_COMMAND).replaceAll('\\', '/')
     )
-    expect(preToolCommands[0]).not.toContain('/tmp/old/agent-hooks/antigravity-hook.sh')
+    expect(checkpointPreTool?.matcher).toBe(getAgentCheckpointToolMatcher('antigravity'))
+    expect(preToolCommands).not.toContain('/tmp/old/agent-hooks/antigravity-hook.sh')
     const commands = config['orca-status'].PostToolUse.flatMap((definition) =>
       (definition.hooks ?? []).map((hook) => hook.command)
     )
@@ -448,8 +515,9 @@ describe('AntigravityHookService', () => {
       expect(stop.command).not.toBe(legacyStop)
       expect(createManagedCommandMatcher('antigravity-stop.cmd')(stop.command)).toBe(true)
       const preToolUse = config['orca-status'].PreToolUse.flatMap((d) => d.hooks ?? [])
-      expect(preToolUse).toHaveLength(1)
+      expect(preToolUse).toHaveLength(2)
       expect(preToolUse[0].command).not.toBe(legacyPreToolUse)
+      expect(preToolUse[1].command).toContain(ANTIGRAVITY_CHECKPOINT_GATE_WRAPPER_FILE_NAME)
     })
   })
 })
