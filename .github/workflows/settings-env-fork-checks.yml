@@ -1,0 +1,28 @@
+name: Settings Env Fork Checks
+
+on:
+  pull_request:
+    paths:
+      - src/renderer/src/components/settings/AgentCatalogRow.tsx
+      - src/renderer/src/components/settings/AgentCatalogRow.test.tsx
+      - .github/workflows/settings-env-fork-checks.yml
+
+permissions:
+  contents: read
+
+jobs:
+  settings-env-checks:
+    name: settings env editor checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-node-dependencies
+        with:
+          native-runtime: node
+      - name: Unit tests
+        run: pnpm test src/renderer/src/components/settings/AgentCatalogRow.test.tsx src/renderer/src/components/settings/AgentsPane.test.tsx
+      - name: Lint changed files
+        run: pnpm exec oxlint src/renderer/src/components/settings/AgentCatalogRow.tsx src/renderer/src/components/settings/AgentCatalogRow.test.tsx
+      - name: Typecheck web
+        run: pnpm tc:web
