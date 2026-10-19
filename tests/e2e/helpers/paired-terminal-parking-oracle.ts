@@ -6,11 +6,11 @@ import {
   toWebTerminalSurfaceTabId
 } from '../../../src/shared/terminal-surface-id'
 import {
-  capturePairedRetentionHeapSnapshot,
   readPairedRetentionSample,
   startRendererLagProbe
 } from '../paired-runtime-retention-metrics'
-import { expect, test } from './orca-app'
+import { expect } from './orca-app'
+import { diagnosePairedRetentionGrowth } from './paired-retention-diagnostics'
 import { verifyHiddenPairedTerminalOutputSuppression } from './paired-terminal-hidden-output-oracle'
 import { createPairedTerminalParkingFixture } from './paired-terminal-parking-fixture'
 import { verifyPairedTerminalTitleFanout } from './paired-terminal-title-fanout-oracle'
@@ -166,7 +166,8 @@ export async function runPairedTerminalParkingOracle(
                     (id) =>
                       verdicts.find((verdict) => verdict.worktreeId === id)?.ordinaryParkingCovers
                   ),
-                  parked: window.__terminalParkingDebug?.parkedTabIds().length,
+                  parked: window.__terminalParkingDebug?.parkedTabIds()
+                    .filter((id) => tabIds.includes(id)).length,
                   retentionBudgetEnabled:
                     window.__store?.getState().settings?.terminalHiddenWorktreeRetentionBudget
                 }
@@ -201,21 +202,9 @@ export async function runPairedTerminalParkingOracle(
     expect(after.mountedTargetManagers).toBe(1)
     expect(maxLagMs).toBeLessThan(MAX_EVICTION_LAG_MS)
     if (baseline.heapBytes !== null && after.heapBytes !== null) {
-      if (after.heapBytes > baseline.heapBytes + MAX_HEAP_GROWTH_BYTES) {
-        const samples = [after]
-        for (const delayMs of [100, 250, 500, 1_000]) {
-          await page.waitForTimeout(delayMs)
-          samples.push(await readPairedRetentionSample(page, remoteTabs.map((tab) => tab.tabId)))
-        }
-        await test.info().attach('paired-retention-failure-samples', {
-          body: JSON.stringify({ baseline, samples }, null, 2),
-          contentType: 'application/json'
-        })
-        await test.info().attach('paired-retention.heapsnapshot', {
-          body: await capturePairedRetentionHeapSnapshot(page),
-          contentType: 'application/json'
-        })
-      }
+      await diagnosePairedRetentionGrowth(
+        page, remoteTabs.map((tab) => tab.tabId), baseline, after, MAX_HEAP_GROWTH_BYTES
+      )
       expect(after.heapBytes).toBeLessThanOrEqual(baseline.heapBytes + MAX_HEAP_GROWTH_BYTES)
     }
 
