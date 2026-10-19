@@ -33,7 +33,10 @@ test('ordinary-parks paired terminals against an isolated headless Orca host', a
       }
       return { fallbackWorktreeId: worktree.id, repoId: worktree.repoId }
     })
-    await runPairedTerminalParkingOracle(client.page, seed)
+    // Reuse the client so a second park/restore cycle exposes retained state.
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      await runPairedTerminalParkingOracle(client.page, seed)
+    }
   } finally {
     await client?.dispose()
     await host.dispose()

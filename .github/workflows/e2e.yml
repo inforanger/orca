@@ -202,6 +202,16 @@ jobs:
           native-runtime: electron
 
       - name: Download E2E build output
+        id: e2e-download
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-build-out
+          path: out/
+
+      # Retry only the transfer; a second failure still blocks all test steps.
+      - name: Retry E2E build download
+        if: steps.e2e-download.outcome == 'failure'
         uses: actions/download-artifact@v8
         with:
           name: e2e-build-out
@@ -294,6 +304,16 @@ jobs:
           native-runtime: electron
 
       - name: Download E2E build output
+        id: e2e-download
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-build-out
+          path: out/
+
+      # Retry only the transfer; a second failure still blocks all test steps.
+      - name: Retry E2E build download
+        if: steps.e2e-download.outcome == 'failure'
         uses: actions/download-artifact@v8
         with:
           name: e2e-build-out
@@ -431,6 +451,16 @@ jobs:
           native-runtime: electron
 
       - name: Download E2E build output
+        id: e2e-download
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-build-out
+          path: out/
+
+      # Retry only the transfer; a second failure still blocks all test steps.
+      - name: Retry E2E build download
+        if: steps.e2e-download.outcome == 'failure'
         uses: actions/download-artifact@v8
         with:
           name: e2e-build-out
@@ -523,7 +553,18 @@ jobs:
       - uses: ./.github/actions/install-node-dependencies
         with:
           native-runtime: electron
-      - uses: actions/download-artifact@v8
+      - name: Download E2E build output
+        id: e2e-download
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-build-out
+          path: out/
+
+      # Retry only the transfer; a second failure still blocks all test steps.
+      - name: Retry E2E build download
+        if: steps.e2e-download.outcome == 'failure'
+        uses: actions/download-artifact@v8
         with:
           name: e2e-build-out
           path: out/

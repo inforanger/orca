@@ -1,6 +1,7 @@
 import type { Page } from '@stablyai/playwright-test'
 import { test, expect } from './helpers/orca-app'
 import { waitForActiveWorktree, waitForSessionReady } from './helpers/store'
+import { waitForActivePanePtyId } from './helpers/terminal'
 import { worktreeRow } from './worktree-row-locators'
 
 const MAX_CLICK_TASK_DURATION_MS = 32
@@ -48,7 +49,7 @@ test.describe('Worktree switch responsiveness', () => {
 
   test('updates the selected workspace in the same click task when changing back', async ({
     orcaPage
-  }) => {
+  }, testInfo) => {
     const [firstWorktreeId, secondWorktreeId] = await prepareSidebarForSwitchTest(orcaPage)
     const firstRow = worktreeRow(orcaPage, firstWorktreeId)
     const secondRow = worktreeRow(orcaPage, secondWorktreeId)
@@ -60,6 +61,10 @@ test.describe('Worktree switch responsiveness', () => {
       'data-rendered-active-worktree-id',
       firstWorktreeId
     )
+
+    // Start from an attached terminal: app startup must not overlap switch timing.
+    // The second workspace still performs its first activation during measurement.
+    await waitForActivePanePtyId(orcaPage)
 
     const result = await orcaPage.evaluate(
       async ({ firstId, secondId, timerDelayMs }) => {
@@ -128,6 +133,10 @@ test.describe('Worktree switch responsiveness', () => {
       { firstId: firstWorktreeId, secondId: secondWorktreeId, timerDelayMs: 120 }
     )
 
+    await testInfo.attach('worktree-switch-measurements', {
+      body: JSON.stringify(result, null, 2),
+      contentType: 'application/json'
+    })
     expect(result.before).toMatchObject({
       firstCurrent: 'page',
       secondCurrent: null,
