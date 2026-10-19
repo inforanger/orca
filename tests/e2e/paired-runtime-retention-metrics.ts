@@ -17,7 +17,8 @@ export async function readPairedRetentionSample(
     await session.send('HeapProfiler.collectGarbage')
     // performance.memory can cache a pre-GC value; sample the same isolate directly.
     const usage = await session.send('Runtime.getHeapUsage')
-    heapBytes = usage.usedSize
+    // Match Blink's usedJSHeapSize: V8 heap plus external ArrayBuffer storage.
+    heapBytes = usage.usedSize + usage.backingStorageSize
   } finally {
     await session.detach()
   }

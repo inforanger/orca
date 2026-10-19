@@ -7,13 +7,14 @@ afterEach(() => vi.unstubAllGlobals())
 function fixture(failingMethod?: string) {
   const calls: string[] = []
   let usedSize = 1_000
+  let backingStorageSize = 200
   const session = {
     send: async (method: string) => {
       calls.push(method)
       if (method === failingMethod) {
         throw new Error(`failed ${method}`)
       }
-      return { usedSize }
+      return { usedSize, backingStorageSize }
     },
     detach: async () => {
       calls.push('detach')
@@ -25,16 +26,19 @@ function fixture(failingMethod?: string) {
       ['unrelated', { getPanes: () => [{ terminal: { cols: 80, buffer: { active: { length: 999 } } } }] }]
     ])
   })
+  // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: The fixture supplies every Page operation used by this sampler.
   const page = {
     context: () => ({ newCDPSession: async () => session }),
     evaluate: async (callback: (ids: string[]) => unknown, ids: string[]) => callback(ids)
-  // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: The fixture supplies every Page operation used by this sampler.
   } as unknown as Page
   return {
     page,
     calls,
     setHeap: (bytes: number) => {
       usedSize = bytes
+    },
+    setBackingStorage: (bytes: number) => {
+      backingStorageSize = bytes
     }
   }
 }
@@ -46,12 +50,12 @@ describe('paired terminal retention measurements', () => {
     f.setHeap(500)
     const after = await readPairedRetentionSample(f.page, ['target', 'parked'])
     expect(baseline).toEqual({
-      heapBytes: 1_000,
+      heapBytes: 1_200,
       bufferCells: 1_600,
       mountedTargetManagers: 1,
       targetPanes: 1
     })
-    expect(after.heapBytes).toBe(500)
+    expect(after.heapBytes).toBe(700)
     expect(f.calls).toEqual([
       'HeapProfiler.collectGarbage',
       'Runtime.getHeapUsage',
@@ -66,6 +70,14 @@ describe('paired terminal retention measurements', () => {
     const f = fixture()
     const baseline = await readPairedRetentionSample(f.page, [])
     f.setHeap(baseline.heapBytes + 32 * 1024 * 1024)
+    const after = await readPairedRetentionSample(f.page, [])
+    expect(after.heapBytes).toBeGreaterThan(baseline.heapBytes + 16 * 1024 * 1024)
+  })
+
+  it('includes retained ArrayBuffer storage in the unchanged memory budget', async () => {
+    const f = fixture()
+    const baseline = await readPairedRetentionSample(f.page, [])
+    f.setBackingStorage(32 * 1024 * 1024)
     const after = await readPairedRetentionSample(f.page, [])
     expect(after.heapBytes).toBeGreaterThan(baseline.heapBytes + 16 * 1024 * 1024)
   })
