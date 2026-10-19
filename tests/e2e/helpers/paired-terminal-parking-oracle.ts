@@ -1,18 +1,13 @@
 import type { Page } from '@stablyai/playwright-test'
 import type { RuntimeTerminalRead } from '../../../src/shared/runtime-types'
 import { TERMINAL_PAIRED_PARKING_RUNTIME_CAPABILITY } from '../../../src/shared/protocol-version'
-import {
-  toWebTerminalSurfaceTabId
-} from '../../../src/shared/terminal-surface-id'
+import { toWebTerminalSurfaceTabId } from '../../../src/shared/terminal-surface-id'
 import {
   readPairedRetentionSample,
   startRendererLagProbe
 } from '../paired-runtime-retention-metrics'
 import { expect } from './orca-app'
-import {
-  diagnosePairedRetentionGrowth,
-  expectHostTerminalsUnmounted
-} from './paired-terminal-parking-assertions'
+import { expectHostTerminalsUnmounted } from './paired-terminal-parking-assertions'
 import { verifyHiddenPairedTerminalOutputSuppression } from './paired-terminal-hidden-output-oracle'
 import { createPairedTerminalParkingFixture } from './paired-terminal-parking-fixture'
 import { verifyPairedTerminalTitleFanout } from './paired-terminal-title-fanout-oracle'
@@ -203,12 +198,15 @@ export async function runPairedTerminalParkingOracle(
     expect(after.bufferCells).toBeLessThanOrEqual(baseline.bufferCells * MAX_RETAINED_CELL_FRACTION)
     expect(after.mountedTargetManagers).toBe(1)
     expect(maxLagMs).toBeLessThan(MAX_EVICTION_LAG_MS)
-    if (baseline.heapBytes !== null && after.heapBytes !== null) {
-      await diagnosePairedRetentionGrowth(
-        page, remoteTabs.map((tab) => tab.tabId), baseline, after, MAX_HEAP_GROWTH_BYTES
+    // Pane disposal and reclamation of external buffers can finish in a later task.
+    // Keep the retained-memory budget, but measure after cleanup converges.
+    await expect
+      .poll(
+        async () =>
+          (await readPairedRetentionSample(page, remoteTabs.map((tab) => tab.tabId))).heapBytes,
+        { timeout: 5_000, intervals: [100, 250, 500] }
       )
-      expect(after.heapBytes).toBeLessThanOrEqual(baseline.heapBytes + MAX_HEAP_GROWTH_BYTES)
-    }
+      .toBeLessThanOrEqual(baseline.heapBytes + MAX_HEAP_GROWTH_BYTES)
 
     const evicted = await page.evaluate(
       (tabs) => tabs.find((tab) => !window.__paneManagers?.has(tab.tabId)) ?? null,

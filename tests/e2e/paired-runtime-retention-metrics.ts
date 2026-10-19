@@ -68,15 +68,3 @@ export async function startRendererLagProbe(page: Page): Promise<JSHandle<{ stop
     }
   })
 }
-
-export async function capturePairedRetentionHeapSnapshot(page: Page): Promise<string> {
-  const session = await page.context().newCDPSession(page)
-  const chunks: string[] = []
-  session.on('HeapProfiler.addHeapSnapshotChunk', ({ chunk }) => chunks.push(chunk))
-  try {
-    await session.send('HeapProfiler.takeHeapSnapshot')
-    return chunks.join('')
-  } finally {
-    await session.detach()
-  }
-}
