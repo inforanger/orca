@@ -48,7 +48,7 @@ test.describe('Worktree switch responsiveness', () => {
 
   test('updates the selected workspace in the same click task when changing back', async ({
     orcaPage
-  }) => {
+  }, testInfo) => {
     const [firstWorktreeId, secondWorktreeId] = await prepareSidebarForSwitchTest(orcaPage)
     const firstRow = worktreeRow(orcaPage, firstWorktreeId)
     const secondRow = worktreeRow(orcaPage, secondWorktreeId)
@@ -128,6 +128,10 @@ test.describe('Worktree switch responsiveness', () => {
       { firstId: firstWorktreeId, secondId: secondWorktreeId, timerDelayMs: 120 }
     )
 
+    await testInfo.attach('worktree-switch-measurements', {
+      body: JSON.stringify(result, null, 2),
+      contentType: 'application/json'
+    })
     expect(result.before).toMatchObject({
       firstCurrent: 'page',
       secondCurrent: null,

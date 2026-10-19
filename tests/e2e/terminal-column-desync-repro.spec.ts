@@ -105,6 +105,21 @@ async function readColumnSnapshot(page: Page, ptyId: string): Promise<ColumnSnap
   return { xtermCols, ptyCols }
 }
 
+async function expectColumnsInSync(page: Page, ptyId: string, label: string): Promise<void> {
+  // ResizeObserver, layout and PTY IPC settle asynchronously; a lost resize still times out.
+  await expect
+    .poll(
+      async () => {
+        const snap = await readColumnSnapshot(page, ptyId)
+        return snap.xtermCols > 0 && snap.ptyCols === snap.xtermCols
+          ? 'synced'
+          : `pty=${snap.ptyCols} xterm=${snap.xtermCols}`
+      },
+      { timeout: 30_000, message: `${label}: PTY cols should converge to xterm cols` }
+    )
+    .toBe('synced')
+}
+
 async function closeRightSidebarAndFeatureTips(page: Page): Promise<void> {
   await page.evaluate(() => {
     const store = window.__store
@@ -136,34 +151,16 @@ test.describe('Terminal column desync repro', () => {
     await ensureTerminalVisible(orcaPage)
     const ptyId = await settleTerminal(orcaPage)
 
-    // Why: the resize chain (ResizeObserver → rAF fit → PTY resize IPC) needs
-    // longer than a fixed wait under loaded CI, and the two columns are sampled
-    // non-atomically. Poll until they converge — a genuinely dropped resize
-    // never converges and still fails, so this keeps the regression guard.
-    const expectColumnsInSync = async (label: string): Promise<void> => {
-      await expect
-        .poll(
-          async () => {
-            const snap = await readColumnSnapshot(orcaPage, ptyId)
-            return snap.ptyCols === snap.xtermCols
-              ? 'synced'
-              : `pty=${snap.ptyCols} xterm=${snap.xtermCols}`
-          },
-          { timeout: 30_000, message: `${label}: PTY cols should converge to xterm cols` }
-        )
-        .toBe('synced')
-    }
-
     // Baseline: a freshly fit terminal should agree with its PTY.
-    await expectColumnsInSync('baseline')
+    await expectColumnsInSync(orcaPage, ptyId, 'baseline')
 
     // Shrink the window while the terminal is visible, then widen it. xterm
     // reflows via the ResizeObserver; the PTY must follow.
     await orcaPage.setViewportSize({ width: 760, height: 800 })
-    await expectColumnsInSync('after shrink')
+    await expectColumnsInSync(orcaPage, ptyId, 'after shrink')
 
     await orcaPage.setViewportSize({ width: 1280, height: 800 })
-    await expectColumnsInSync('after widen')
+    await expectColumnsInSync(orcaPage, ptyId, 'after widen')
   })
 
   // Why: guards the applied-size IPC contract the desync fix relies on. The
@@ -217,10 +214,7 @@ test.describe('Terminal column desync repro', () => {
     await ensureTerminalVisible(orcaPage)
     const ptyId = await settleTerminal(orcaPage)
     await orcaPage.setViewportSize({ width: 1280, height: 800 })
-    await orcaPage.waitForTimeout(400)
-
-    const baseline = await readColumnSnapshot(orcaPage, ptyId)
-    expect(baseline.ptyCols).toBe(baseline.xtermCols)
+    await expectColumnsInSync(orcaPage, ptyId, 'before hidden resize')
 
     // Hide the terminal by switching worktrees, resize the window narrow while
     // it is in the background (so isRendererPtyResizeAuthoritative() is false
@@ -232,14 +226,7 @@ test.describe('Terminal column desync repro', () => {
     await switchToWorktree(orcaPage, homeWorktreeId)
     await ensureTerminalVisible(orcaPage)
     await waitForActiveTerminalManager(orcaPage, 30_000)
-    await orcaPage.waitForTimeout(600)
-
-    const afterReturn = await readColumnSnapshot(orcaPage, ptyId)
-    expect(
-      afterReturn.ptyCols,
-      `after hidden resize + return, PTY cols (${afterReturn.ptyCols}) should equal xterm cols ` +
-        `(${afterReturn.xtermCols}); a stale PTY width is the column-desync bug`
-    ).toBe(afterReturn.xtermCols)
+    await expectColumnsInSync(orcaPage, ptyId, 'after hidden resize + return')
   })
 
   test('PTY columns re-sync after repeated background resizes', async ({ orcaPage }) => {

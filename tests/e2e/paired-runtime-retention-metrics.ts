@@ -2,7 +2,7 @@ import type { JSHandle, Page } from '@stablyai/playwright-test'
 
 export type PairedRetentionSample = {
   bufferCells: number
-  heapBytes: number | null
+  heapBytes: number
   mountedTargetManagers: number
   targetPanes: number
 }
@@ -11,14 +11,17 @@ export async function readPairedRetentionSample(
   page: Page,
   tabIds: string[]
 ): Promise<PairedRetentionSample> {
+  const session = await page.context().newCDPSession(page)
+  let heapBytes: number
   try {
-    const session = await page.context().newCDPSession(page)
     await session.send('HeapProfiler.collectGarbage')
+    // performance.memory can cache a pre-GC value; sample the same isolate directly.
+    const usage = await session.send('Runtime.getHeapUsage')
+    heapBytes = usage.usedSize
+  } finally {
     await session.detach()
-  } catch {
-    // GC only improves measurement fidelity.
   }
-  return page.evaluate((targets) => {
+  const sample = await page.evaluate((targets) => {
     let bufferCells = 0
     let mountedTargetManagers = 0
     let targetPanes = 0
@@ -37,14 +40,13 @@ export async function readPairedRetentionSample(
         bufferCells += buffer.length * pane.terminal.cols
       }
     }
-    const memory = (performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory
     return {
       bufferCells,
-      heapBytes: memory?.usedJSHeapSize ?? null,
       mountedTargetManagers,
       targetPanes
     }
   }, tabIds)
+  return { ...sample, heapBytes }
 }
 
 export async function startRendererLagProbe(page: Page): Promise<JSHandle<{ stop: () => number }>> {
