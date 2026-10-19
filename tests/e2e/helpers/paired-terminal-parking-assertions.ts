@@ -4,7 +4,8 @@ import {
   readPairedRetentionSample,
   type PairedRetentionSample
 } from '../paired-runtime-retention-metrics'
-import { test } from './orca-app'
+import { toHostSessionTabId } from '../../../src/shared/terminal-surface-id'
+import { expect, test } from './orca-app'
 
 export async function diagnosePairedRetentionGrowth(
   page: Page,
@@ -29,4 +30,27 @@ export async function diagnosePairedRetentionGrowth(
     body: await capturePairedRetentionHeapSnapshot(page),
     contentType: 'application/json'
   })
+}
+
+export async function expectHostTerminalsUnmounted(
+  hostPage: Page | undefined,
+  activeWorktreeId: string,
+  remoteTabs: { tabId: string }[]
+): Promise<void> {
+  if (!hostPage) {
+    return
+  }
+  await expect
+    .poll(
+      () =>
+        hostPage.evaluate(
+          (tabIds) => ({
+            activeWorktreeId: window.__store?.getState().activeWorktreeId,
+            mountedCount: tabIds.filter((tabId) => window.__paneManagers?.has(tabId)).length
+          }),
+          remoteTabs.map(({ tabId }) => toHostSessionTabId(tabId))
+        ),
+      { timeout: 30_000 }
+    )
+    .toEqual({ activeWorktreeId, mountedCount: 0 })
 }
