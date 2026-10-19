@@ -10,7 +10,9 @@ function fixture(failingMethod?: string) {
   const session = {
     send: async (method: string) => {
       calls.push(method)
-      if (method === failingMethod) throw new Error(`failed ${method}`)
+      if (method === failingMethod) {
+        throw new Error(`failed ${method}`)
+      }
       return { usedSize }
     },
     detach: async () => {
