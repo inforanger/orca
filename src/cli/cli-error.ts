@@ -239,3 +239,20 @@ function localCliErrorData(error: unknown, context: CliErrorContext): unknown {
   }
   return undefined
 }
+
+const FATAL_ERROR_CODES = new Set([
+  'consumer_fenced',
+  'consumer_closed',
+  'fenced_by_subsequent',
+  'stable_pane_required',
+  'terminal_not_found',
+  'permission_denied'
+])
+
+export function resolveCliExitCode(error: unknown): number {
+  const code = errorCode(error)
+  if (code && FATAL_ERROR_CODES.has(code)) {
+    return 2
+  }
+  return 1
+}
