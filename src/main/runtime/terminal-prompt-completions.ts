@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto'
 import type { EnrichedAgentHookEventPayload } from '../agent-hooks/server/server-types'
 import type {
   TerminalPromptCompletion,
-  TerminalPromptResult
+  TerminalPromptResult,
+  TerminalCompletion,
+  TerminalLastCompletion
 } from '../../shared/terminal-prompt-result'
 import type {
   AgentPromptRequestBaseline,
@@ -17,6 +19,7 @@ type Entry = Request & {
   completion?: TerminalPromptCompletion
   text?: string
 }
+type LatestEntry = Binding & { startedAt: number; completion: TerminalCompletion; text: string }
 
 const MAX_ENTRIES = 1_024
 const MAX_RETAINED_CHARS = 16 * 1024 * 1024
@@ -24,7 +27,11 @@ const PAGE_CHARS = 16_384
 
 export class TerminalPromptCompletions {
   private readonly entries = new Map<string, Entry>()
-  private readonly latestTurns = new Map<string, Binding & { startedAt: number }>()
+  private readonly latestTurns = new Map<
+    string,
+    Binding & { startedAt: number; running: boolean }
+  >()
+  private readonly lastCompletions = new Map<string, LatestEntry>()
   private readonly listeners = new Map<string, Set<() => void>>()
   private retainedChars = 0
 
@@ -74,21 +81,18 @@ export class TerminalPromptCompletions {
       return
     }
     const previous = this.latestTurns.get(terminal)
-    this.latestTurns.delete(terminal)
-    this.latestTurns.set(terminal, {
-      ...binding,
-      startedAt:
-        previous?.processIncarnation === binding.processIncarnation &&
-        previous.generation === binding.generation
-          ? Math.max(previous.startedAt, startedAt)
-          : startedAt
-    })
+    const lead = event.payload.mainAgent ?? event.payload
+    if (!previous || !sameBinding(previous, binding) || startedAt >= previous.startedAt) {
+      this.latestTurns.delete(terminal)
+      this.latestTurns.set(terminal, { ...binding, startedAt, running: lead.state !== 'done' })
+    }
     if (this.latestTurns.size > MAX_ENTRIES) {
       const oldest = this.latestTurns.keys().next().value
       if (oldest !== undefined) {
         this.latestTurns.delete(oldest)
       }
     }
+    let matched: Entry | undefined
     for (const entry of this.entries.values()) {
       if (
         entry.terminal !== terminal ||
@@ -99,11 +103,15 @@ export class TerminalPromptCompletions {
         continue
       }
       if (entry.completion) {
+        if (entry.turnStartedAt === startedAt) {
+          matched = entry
+        }
         if (
           entry.turnStartedAt === startedAt &&
           !entry.completion.answerComplete &&
           event.hookEventName === 'Stop' &&
-          event.fullAssistantMessage !== undefined
+          event.fullAssistantMessage !== undefined &&
+          !event.payload.lastAssistantMessageIsToolOutput
         ) {
           this.finish(entry, entry.completion, event.fullAssistantMessage)
         }
@@ -130,7 +138,7 @@ export class TerminalPromptCompletions {
       if (entry.turnStartedAt !== startedAt) {
         continue
       }
-      const lead = event.payload.mainAgent ?? event.payload
+      matched = entry
       if (lead.state !== 'done') {
         continue
       }
@@ -150,7 +158,9 @@ export class TerminalPromptCompletions {
             outcome === 'unconfirmed'
           ? 'error'
           : 'done'
-      const text = event.fullAssistantMessage
+      const text = event.payload.lastAssistantMessageIsToolOutput
+        ? undefined
+        : event.fullAssistantMessage
       this.finish(
         entry,
         {
@@ -162,6 +172,7 @@ export class TerminalPromptCompletions {
       )
       break
     }
+    this.recordLatest(terminal, binding, event, matched)
   }
 
   clearForPty(ptyId: string): void {
@@ -174,6 +185,121 @@ export class TerminalPromptCompletions {
         })
       }
     }
+    for (const [terminal, latest] of this.lastCompletions) {
+      if (latest.ptyId === ptyId) {
+        this.retainedChars -= latest.text.length
+        this.lastCompletions.delete(terminal)
+      }
+    }
+    for (const [terminal, latest] of this.latestTurns) {
+      if (latest.ptyId === ptyId) {
+        this.latestTurns.delete(terminal)
+      }
+    }
+  }
+
+  readLast(
+    terminal: string,
+    binding: Binding,
+    offset = 0,
+    limit = PAGE_CHARS,
+    turnId?: string
+  ): TerminalLastCompletion {
+    const current = this.latestTurns.get(terminal)
+    const currentTurn: TerminalLastCompletion['currentTurn'] =
+      current && sameBinding(current, binding)
+        ? {
+            state: current.running ? 'running' : 'idle',
+            turnId: `${binding.processIncarnation}:${binding.generation}:${current.startedAt}`
+          }
+        : { state: 'unknown' }
+    const latest = this.lastCompletions.get(terminal)
+    if (
+      !latest ||
+      !sameBinding(latest, binding) ||
+      (turnId !== undefined && turnId !== latest.completion.turnId)
+    ) {
+      return { state: 'unavailable', currentTurn }
+    }
+    return {
+      state: 'completed',
+      currentTurn,
+      completion: { ...latest.completion },
+      answer: answerPage(latest.text, offset, limit)
+    }
+  }
+
+  private recordLatest(
+    terminal: string,
+    binding: Binding,
+    event: EnrichedAgentHookEventPayload,
+    matched?: Entry
+  ): void {
+    const startedAt = event.turnStartedAt
+    if (startedAt === undefined) {
+      return
+    }
+    const lead = event.payload.mainAgent ?? event.payload
+    const outcome = event.payload.mainAgent?.outcome
+    const interrupted =
+      event.payload.interrupted ||
+      outcome === 'cancellation' ||
+      outcome === 'interruption' ||
+      outcome === 'superseded'
+    if (
+      lead.state !== 'done' ||
+      (!interrupted && event.hookEventName !== 'Stop' && event.hookEventName !== 'StopFailure')
+    ) {
+      return
+    }
+    const previous = this.lastCompletions.get(terminal)
+    if (previous && sameBinding(previous, binding) && previous.startedAt > startedAt) {
+      return
+    }
+    const sameTurn = previous && sameBinding(previous, binding) && previous.startedAt === startedAt
+    if (sameTurn && previous.completion.answerComplete) {
+      return
+    }
+    const text = event.payload.lastAssistantMessageIsToolOutput
+      ? undefined
+      : event.fullAssistantMessage
+    const status = interrupted
+      ? 'interrupted'
+      : event.hookEventName === 'StopFailure' || outcome === 'failure' || outcome === 'unconfirmed'
+        ? 'error'
+        : 'done'
+    const completion: TerminalCompletion = sameTurn
+      ? previous.completion
+      : {
+          terminal,
+          processIncarnation: binding.processIncarnation,
+          generation: binding.generation,
+          turnId: `${binding.processIncarnation}:${binding.generation}:${startedAt}`,
+          status,
+          completedAt: event.payload.turnCompletedAt ?? event.receivedAt,
+          reason: outcome ?? (status === 'error' ? 'failure' : 'outcome_unknown'),
+          origin: matched ? 'bridge_request' : 'unknown',
+          ...(matched ? { requestId: matched.requestId } : {}),
+          answerLength: 0,
+          answerSha256: '',
+          answerComplete: false
+        }
+    this.retainedChars -= previous?.text.length ?? 0
+    const answer = text ?? ''
+    this.lastCompletions.delete(terminal)
+    this.lastCompletions.set(terminal, {
+      ...binding,
+      startedAt,
+      text: answer,
+      completion: {
+        ...completion,
+        answerLength: answer.length,
+        answerSha256: createHash('sha256').update(answer, 'utf8').digest('hex'),
+        answerComplete: text !== undefined
+      }
+    })
+    this.retainedChars += answer.length
+    this.trim()
   }
 
   read(terminal: string, requestId: string, offset = 0, limit = PAGE_CHARS): TerminalPromptResult {
@@ -184,17 +310,10 @@ export class TerminalPromptCompletions {
     if (!entry.completion) {
       return { state: 'pending' }
     }
-    const text = entry.text ?? ''
-    const start = Math.min(Math.max(0, offset), text.length)
-    const end = Math.min(start + Math.max(1, Math.min(limit, PAGE_CHARS)), text.length)
     return {
       state: 'completed',
       completion: { ...entry.completion },
-      answer: {
-        text: text.slice(start, end),
-        offset: start,
-        nextOffset: end < text.length ? end : null
-      }
+      answer: answerPage(entry.text ?? '', offset, limit)
     }
   }
 
@@ -264,7 +383,10 @@ export class TerminalPromptCompletions {
 
   private trim(): void {
     for (const [id, entry] of this.entries) {
-      if (this.entries.size <= MAX_ENTRIES && this.retainedChars <= MAX_RETAINED_CHARS) {
+      if (
+        this.entries.size + this.lastCompletions.size <= MAX_ENTRIES &&
+        this.retainedChars <= MAX_RETAINED_CHARS
+      ) {
         break
       }
       if (!entry.completion && this.entries.size <= MAX_ENTRIES) {
@@ -277,5 +399,29 @@ export class TerminalPromptCompletions {
         listener()
       }
     }
+    for (const [terminal, latest] of this.lastCompletions) {
+      if (
+        this.entries.size + this.lastCompletions.size <= MAX_ENTRIES &&
+        this.retainedChars <= MAX_RETAINED_CHARS
+      ) {
+        break
+      }
+      this.retainedChars -= latest.text.length
+      this.lastCompletions.delete(terminal)
+    }
   }
+}
+
+function sameBinding(left: Binding, right: Binding): boolean {
+  return (
+    left.ptyId === right.ptyId &&
+    left.generation === right.generation &&
+    left.processIncarnation === right.processIncarnation
+  )
+}
+
+function answerPage(text: string, offset: number, limit: number) {
+  const start = Math.min(Math.max(0, offset), text.length)
+  const end = Math.min(start + Math.max(1, Math.min(limit, PAGE_CHARS)), text.length)
+  return { text: text.slice(start, end), offset: start, nextOffset: end < text.length ? end : null }
 }

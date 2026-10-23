@@ -29,6 +29,12 @@ export const TerminalWaitPrompt = TerminalHandle.extend({
   timeoutMs: z.number().int().min(0).max(3_600_000).optional()
 })
 
+export const TerminalLastCompletion = TerminalHandle.extend({
+  turnId: requiredString('Missing completion turn ID').optional(),
+  offset: z.number().int().nonnegative().optional(),
+  limit: z.number().int().min(1).max(16_384).optional()
+})
+
 /**
  * `terminal.inspectProcess` carries one member the sibling handle methods must not: whether the
  * caller's answer decides something once, which is what licenses the host to pay for a process-table

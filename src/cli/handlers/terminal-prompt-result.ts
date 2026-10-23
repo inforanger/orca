@@ -1,20 +1,31 @@
 import type { CommandHandler } from '../dispatch'
-import type { TerminalPromptResult } from '../../shared/terminal-prompt-result'
-import { TERMINAL_PROMPT_COMPLETIONS_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
+import type {
+  TerminalLastCompletion,
+  TerminalPromptResult
+} from '../../shared/terminal-prompt-result'
+import {
+  TERMINAL_LAST_COMPLETION_RUNTIME_CAPABILITY,
+  TERMINAL_PROMPT_COMPLETIONS_RUNTIME_CAPABILITY
+} from '../../shared/protocol-version'
 import { getOptionalPositiveIntegerFlag, getRequiredStringFlag } from '../flags'
 import { getTerminalHandle } from '../selectors'
 import { RuntimeClientError } from '../runtime-client'
 import { printResult } from '../format'
 
-function promptResultHandler(wait: boolean): CommandHandler {
+function promptResultHandler(mode: 'read' | 'wait' | 'last'): CommandHandler {
   return async ({ flags, client, cwd, json }) => {
+    const wait = mode === 'wait'
+    const last = mode === 'last'
     const status = await client.getCliStatus()
-    if (
-      !status.result.runtime.capabilities?.includes(TERMINAL_PROMPT_COMPLETIONS_RUNTIME_CAPABILITY)
-    ) {
+    const capability = last
+      ? TERMINAL_LAST_COMPLETION_RUNTIME_CAPABILITY
+      : TERMINAL_PROMPT_COMPLETIONS_RUNTIME_CAPABILITY
+    if (!status.result.runtime.capabilities?.includes(capability)) {
       throw new RuntimeClientError(
         'incompatible_runtime',
-        'Update the execution host to use terminal prompt completions.'
+        last
+          ? 'Update the execution host to use terminal last completion.'
+          : 'Update the execution host to use terminal prompt completions.'
       )
     }
     const offsetText = flags.get('offset')
@@ -34,11 +45,16 @@ function promptResultHandler(wait: boolean): CommandHandler {
     if (limit !== undefined && limit > 16_384) {
       throw new RuntimeClientError('invalid_argument', '--limit must not exceed 16384')
     }
-    const result = await client.call<{ prompt: TerminalPromptResult }>(
-      wait ? 'terminal.waitPrompt' : 'terminal.promptResult',
+    const result = await client.call<{
+      prompt?: TerminalPromptResult
+      last?: TerminalLastCompletion
+    }>(
+      last ? 'terminal.lastCompletion' : wait ? 'terminal.waitPrompt' : 'terminal.promptResult',
       {
         terminal: await getTerminalHandle(flags, cwd, client),
-        requestId: getRequiredStringFlag(flags, 'request-id'),
+        ...(last
+          ? { turnId: flags.get('turn-id') }
+          : { requestId: getRequiredStringFlag(flags, 'request-id') }),
         ...(wait
           ? { timeoutMs }
           : {
@@ -48,16 +64,18 @@ function promptResultHandler(wait: boolean): CommandHandler {
       },
       wait ? { timeoutMs: timeoutMs + 5_000 } : undefined
     )
-    printResult(result, json, ({ prompt }) => JSON.stringify(prompt, null, 2))
+    printResult(result, json, (body) => JSON.stringify(body.last ?? body.prompt, null, 2))
+    const completion = result.result.last ?? result.result.prompt
     if (
-      result.result.prompt.state !== 'completed' ||
-      !result.result.prompt.completion?.answerComplete ||
-      result.result.prompt.completion.status !== 'done'
+      completion?.state !== 'completed' ||
+      !completion.completion?.answerComplete ||
+      completion.completion.status !== 'done'
     ) {
       process.exitCode = 1
     }
   }
 }
 
-export const terminalPromptResultHandler = promptResultHandler(false)
-export const terminalWaitPromptHandler = promptResultHandler(true)
+export const terminalPromptResultHandler = promptResultHandler('read')
+export const terminalWaitPromptHandler = promptResultHandler('wait')
+export const terminalLastResultHandler = promptResultHandler('last')

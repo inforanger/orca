@@ -3,6 +3,7 @@ import {
   TerminalHandle,
   TerminalPromptResult,
   TerminalWaitPrompt,
+  TerminalLastCompletion,
   TerminalInspectProcess,
   TerminalListParams,
   TerminalRead,
@@ -13,6 +14,19 @@ import {
 } from './unary-schemas'
 
 export const TERMINAL_QUERY_METHODS = [
+  defineMethod({
+    name: 'terminal.lastCompletion',
+    permission: 'workspace',
+    params: TerminalLastCompletion,
+    handler: async (params, { runtime }) => ({
+      last: runtime.getTerminalLastCompletion(
+        params.terminal,
+        params.offset,
+        params.limit,
+        params.turnId
+      )
+    })
+  }),
   defineMethod({
     name: 'terminal.promptResult',
     permission: 'workspace',

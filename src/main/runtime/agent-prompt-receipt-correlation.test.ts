@@ -74,6 +74,11 @@ describe('agent prompt receipt correlation', () => {
     expect(runtime.getTerminalPromptResult(handle, 'fast-answer', 16384).answer?.text).toBe(
       text.slice(16384)
     )
+    expect(runtime.getTerminalLastCompletion(handle).completion).toMatchObject({
+      origin: 'bridge_request',
+      requestId: 'fast-answer',
+      answerLength: text.length
+    })
   })
 
   it('assigns historical lifecycle edges to queued receipts in FIFO order', async () => {

@@ -10,7 +10,10 @@ import { verifyAgentPromptSubmission } from './agent-prompt-submission-verificat
 import { AgentPromptRequestCorrelation } from './agent-prompt-request-correlation'
 import { TerminalPromptCompletions } from './terminal-prompt-completions'
 import type { EnrichedAgentHookEventPayload } from '../agent-hooks/server/server-types'
-import type { TerminalPromptResult } from '../../shared/terminal-prompt-result'
+import type {
+  TerminalLastCompletion,
+  TerminalPromptResult
+} from '../../shared/terminal-prompt-result'
 
 export class OrcaRuntimeWithAgentPromptRequestCorrelation extends OrcaRuntimeWithSerializeAgentPromptSubmission {
   private readonly agentPromptCorrelation = new AgentPromptRequestCorrelation()
@@ -41,6 +44,21 @@ export class OrcaRuntimeWithAgentPromptRequestCorrelation extends OrcaRuntimeWit
     limit?: number
   ): TerminalPromptResult {
     return this.promptCompletions.read(handle, requestId, offset, limit)
+  }
+
+  getTerminalLastCompletion(
+    handle: string,
+    offset?: number,
+    limit?: number,
+    turnId?: string
+  ): TerminalLastCompletion {
+    return this.promptCompletions.readLast(
+      handle,
+      this.getTerminalPromptRequestBinding(handle),
+      offset,
+      limit,
+      turnId
+    )
   }
 
   waitForTerminalPrompt(

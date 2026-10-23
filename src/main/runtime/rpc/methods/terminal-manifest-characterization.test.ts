@@ -9,6 +9,7 @@ import {
 } from './terminal/stream-schemas'
 
 const METHOD_CASES: readonly (readonly [string, unknown, boolean])[] = [
+  ['terminal.lastCompletion', { terminal: 'term' }, false],
   ['terminal.promptResult', { terminal: 'term', requestId: 'request' }, false],
   ['terminal.waitPrompt', { terminal: 'term', requestId: 'request' }, false],
   ['terminal.list', {}, false],
@@ -70,6 +71,26 @@ async function invoke(name: string, params: unknown, runtime: Partial<OrcaRuntim
 }
 
 describe('terminal RPC manifest characterization', () => {
+  it('validates latest-completion pages and passes the optional turn fence', async () => {
+    const getTerminalLastCompletion = vi.fn(() => ({
+      state: 'unavailable' as const,
+      currentTurn: { state: 'unknown' as const }
+    }))
+    await expect(
+      invoke(
+        'terminal.lastCompletion',
+        { terminal: 'term', offset: 2, limit: 3, turnId: 'turn' },
+        { getTerminalLastCompletion }
+      )
+    ).resolves.toMatchObject({ last: { state: 'unavailable' } })
+    expect(getTerminalLastCompletion).toHaveBeenCalledWith('term', 2, 3, 'turn')
+    expect(() =>
+      schemaFor('terminal.lastCompletion').parse({ terminal: 'term', offset: -1 })
+    ).toThrow()
+    expect(() =>
+      schemaFor('terminal.lastCompletion').parse({ terminal: 'term', limit: 16385 })
+    ).toThrow()
+  })
   it('validates prompt-result paging and passes request identity to the runtime', async () => {
     const getTerminalPromptResult = vi.fn(() => ({ state: 'pending' as const }))
     const waitForTerminalPrompt = vi.fn(async () => ({ state: 'unavailable' as const }))
@@ -105,11 +126,11 @@ describe('terminal RPC manifest characterization', () => {
     ).toThrow()
   })
   it('preserves all method names, order, streaming flags, and parseable minimum inputs', () => {
-    expect(TERMINAL_METHODS).toHaveLength(39)
+    expect(TERMINAL_METHODS).toHaveLength(40)
     expect(TERMINAL_METHODS.map((method) => [method.name, 'stream' in method])).toEqual(
       METHOD_CASES.map(([name, _params, stream]) => [name, stream])
     )
-    expect(new Set(TERMINAL_METHODS.map((method) => method.name)).size).toBe(39)
+    expect(new Set(TERMINAL_METHODS.map((method) => method.name)).size).toBe(40)
     for (const [name, params] of METHOD_CASES) {
       expect(() => schemaFor(name).parse(params), name).not.toThrow()
     }

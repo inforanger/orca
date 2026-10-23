@@ -7,6 +7,7 @@ export {
   TerminalHandle,
   TerminalPromptResult,
   TerminalWaitPrompt,
+  TerminalLastCompletion,
   TerminalInspectProcess,
   TerminalListParams,
   TerminalRead,

@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { TERMINAL_PROMPT_COMPLETIONS_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
+import {
+  TERMINAL_LAST_COMPLETION_RUNTIME_CAPABILITY,
+  TERMINAL_PROMPT_COMPLETIONS_RUNTIME_CAPABILITY
+} from '../../shared/protocol-version'
 import { RuntimeClient } from '../runtime-client'
-import { terminalPromptResultHandler, terminalWaitPromptHandler } from './terminal-prompt-result'
+import {
+  terminalLastResultHandler,
+  terminalPromptResultHandler,
+  terminalWaitPromptHandler
+} from './terminal-prompt-result'
 
 const { status, call, print } = vi.hoisted(() => ({
   status: vi.fn(),
@@ -30,6 +37,35 @@ function context(flags: Record<string, string>) {
 }
 
 describe('terminal prompt completion commands', () => {
+  it('requires the separate latest-completion capability', async () => {
+    status.mockResolvedValue({
+      result: { runtime: { capabilities: [TERMINAL_PROMPT_COMPLETIONS_RUNTIME_CAPABILITY] } }
+    })
+    await expect(terminalLastResultHandler(context({}))).rejects.toThrow('terminal last completion')
+    expect(call).not.toHaveBeenCalled()
+  })
+
+  it('reads the latest completion without a request ID and preserves the page fence', async () => {
+    status.mockResolvedValue({
+      result: { runtime: { capabilities: [TERMINAL_LAST_COMPLETION_RUNTIME_CAPABILITY] } }
+    })
+    call.mockResolvedValue({
+      result: {
+        last: {
+          state: 'completed',
+          currentTurn: { state: 'running' },
+          completion: { status: 'done', answerComplete: true }
+        }
+      }
+    })
+    await terminalLastResultHandler(context({ offset: '12', limit: '1000', 'turn-id': 'turn' }))
+    expect(call).toHaveBeenCalledWith(
+      'terminal.lastCompletion',
+      { terminal: 'term-1', offset: 12, limit: 1000, turnId: 'turn' },
+      undefined
+    )
+    expect(process.exitCode).toBe(0)
+  })
   afterEach(() => {
     vi.clearAllMocks()
     process.exitCode = 0

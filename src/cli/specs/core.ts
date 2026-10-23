@@ -186,6 +186,18 @@ export const CORE_COMMAND_SPECS: CommandSpec[] = [
   },
   TERMINAL_SEND_COMMAND_SPEC,
   {
+    path: ['terminal', 'last-result'],
+    summary: 'Read the latest completed turn, including turns without a send request',
+    usage:
+      'orca terminal last-result --terminal <handle> [--turn-id <id>] [--offset <n>] [--limit <n>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'terminal', 'turn-id', 'offset', 'limit'],
+    notes: [
+      'The response separates currentTurn from the retained completion. Origin unknown does not prove direct user input or bridge ownership.',
+      'Follow answer.nextOffset and pass completion.turnId as --turn-id to prevent mixing pages from different turns. Verify UTF-16 answerLength, UTF-8 answerSha256, and answerComplete.',
+      'Only the current terminal incarnation is returned. Records share the bounded in-memory completion store and are lost on restart.'
+    ]
+  },
+  {
     path: ['terminal', 'prompt-result'],
     summary: 'Read a retained request completion and one answer page',
     usage:
@@ -193,7 +205,7 @@ export const CORE_COMMAND_SPECS: CommandSpec[] = [
     allowedFlags: [...GLOBAL_FLAGS, 'terminal', 'request-id', 'offset', 'limit'],
     notes: [
       'Follow answer.nextOffset until null to retrieve the full answer. Offsets and answerLength count UTF-16 code units; answerSha256 hashes the complete UTF-8 text.',
-      'Records are retained in memory for this runtime only, bounded by 1024 requests and 16 Mi characters. Evicted or unknown requests report unavailable.'
+      'Records are retained in memory for this runtime only, sharing 1024 records and 16 Mi characters with latest-turn snapshots. Evicted or unknown requests report unavailable.'
     ]
   },
   {

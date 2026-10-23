@@ -44,7 +44,11 @@ import {
 } from '../selectors'
 import { terminalCloseHandler } from './terminal-close'
 import { terminalSendHandler } from './terminal-send'
-import { terminalPromptResultHandler, terminalWaitPromptHandler } from './terminal-prompt-result'
+import {
+  terminalLastResultHandler,
+  terminalPromptResultHandler,
+  terminalWaitPromptHandler
+} from './terminal-prompt-result'
 
 // Why: terminal wait legitimately needs to outlive the CLI's default RPC
 // timeout. Even without an explicit server timeout, the client must allow
@@ -61,6 +65,7 @@ const terminalFocusHandler: CommandHandler = async ({ flags, client, cwd, json }
 
 export const TERMINAL_HANDLERS: Record<string, CommandHandler> = {
   'terminal prompt-result': terminalPromptResultHandler,
+  'terminal last-result': terminalLastResultHandler,
   'terminal wait-prompt': terminalWaitPromptHandler,
   'terminal list': async ({ flags, client, cwd, json }) => {
     const result = await client.call<WithAnnotatedHostScope<RuntimeTerminalListResult>>(

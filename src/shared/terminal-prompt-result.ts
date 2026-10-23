@@ -18,3 +18,15 @@ export type TerminalPromptResult = {
   completion?: TerminalPromptCompletion
   answer?: { text: string; offset: number; nextOffset: number | null }
 }
+
+export type TerminalCompletion = Omit<TerminalPromptCompletion, 'requestId'> & {
+  origin: 'bridge_request' | 'direct_user' | 'unknown'
+  requestId?: string
+}
+
+export type TerminalLastCompletion = {
+  state: 'completed' | 'unavailable'
+  currentTurn: { state: 'running' | 'idle' | 'unknown'; turnId?: string }
+  completion?: TerminalCompletion
+  answer?: { text: string; offset: number; nextOffset: number | null }
+}
