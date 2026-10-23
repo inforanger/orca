@@ -68,7 +68,20 @@ export class OrcaRuntimeWithWriteTerminalAgentPrompt extends OrcaRuntimeWithReso
       // beginning when a large frame is split into independently processed chunks.
       renderGate?.arm()
       const initialWrite = submitWithPaste ? pastePayload + AGENT_PROMPT_SUBMIT : pastePayload
+      if (submitWithPaste && options.acceptQueued && options.requestId) {
+        this.registerAgentPromptRequest(
+          handle,
+          ptyId,
+          generation,
+          options.requestId,
+          preSubmitBaseline.workingSequence,
+          preSubmitBaseline.explicitWorkingStartedAt
+        )
+      }
       if (!this.ptyController?.write(ptyId, initialWrite, options.inputKind)) {
+        if (options.requestId) {
+          this.forgetAgentPromptRequest(ptyId, generation, options.requestId)
+        }
         throw new Error('terminal_not_writable')
       }
     } catch (error) {
@@ -114,7 +127,20 @@ export class OrcaRuntimeWithWriteTerminalAgentPrompt extends OrcaRuntimeWithReso
     const baseline = preSubmitBaseline ?? this.getAgentPromptActivity(handle, ptyId, waitTextCache)
     this.assertAgentPromptPermissionSafe(permissionBaseline, baseline)
     if (!submitWithPaste) {
+      if (options.acceptQueued && options.requestId) {
+        this.registerAgentPromptRequest(
+          handle,
+          ptyId,
+          generation,
+          options.requestId,
+          baseline.workingSequence,
+          baseline.explicitWorkingStartedAt
+        )
+      }
       if (!this.ptyController?.write(ptyId, AGENT_PROMPT_SUBMIT, options.inputKind)) {
+        if (options.requestId) {
+          this.forgetAgentPromptRequest(ptyId, generation, options.requestId)
+        }
         throw new Error(options.suffixFailureError ?? 'terminal_not_writable')
       }
     }
@@ -164,13 +190,6 @@ export class OrcaRuntimeWithWriteTerminalAgentPrompt extends OrcaRuntimeWithReso
     if (!settlementAgent) {
       return { submits, prompt: inputAccepted }
     }
-    this.registerAgentPromptRequest(
-      ptyId,
-      generation,
-      options.requestId,
-      baseline.workingSequence,
-      baseline.explicitWorkingStartedAt
-    )
     try {
       await verifyAgentPromptSubmission({
         baseline,
@@ -188,7 +207,6 @@ export class OrcaRuntimeWithWriteTerminalAgentPrompt extends OrcaRuntimeWithReso
         signal: options.signal,
         timeoutMs: options.observationTimeoutMs ?? effectTimeoutMs
       })
-      this.forgetAgentPromptRequest(ptyId, generation, options.requestId)
       return {
         submits,
         prompt: {

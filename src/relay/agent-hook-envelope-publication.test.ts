@@ -123,6 +123,25 @@ function makeEnvelope(sizes: {
 }
 
 describe('publishAgentHookEnvelope', () => {
+  it('marks a full answer as shed without mutating the cached envelope', () => {
+    const primary = makeBoundedClient(65536)
+    const dispatcher = new RelayDispatcher(primary.write, primary.options)
+    try {
+      const envelope = {
+        ...makeEnvelope({ lastAssistantMessage: 128 }),
+        fullAssistantMessage: 'x'.repeat(200000)
+      }
+      publishAgentHookEnvelope(dispatcher, envelope)
+      const published = decodeEnvelopes(primary)
+      expect(published).toHaveLength(1)
+      expect(published[0].fullAssistantMessage).toBeUndefined()
+      expect(published[0].shedFields).toContain('fullAssistantMessage')
+      expect(published[0].payload.lastAssistantMessage).toBe('a'.repeat(128))
+      expect(envelope.fullAssistantMessage).toHaveLength(200000)
+    } finally {
+      dispatcher.dispose()
+    }
+  })
   beforeEach(() => {
     vi.useFakeTimers()
   })

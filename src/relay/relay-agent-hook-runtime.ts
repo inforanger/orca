@@ -1,4 +1,5 @@
 import { AGENT_HOOK_INFER_INTERRUPT_METHOD } from '../shared/agent-hook-interrupt-reconciliation'
+import { TERMINAL_ANSWER_READ_METHOD } from '../shared/terminal-answer-transfer'
 import { homedir } from 'node:os'
 import type { RelayDispatcher } from './dispatcher'
 import type { PtyEnvAugmenter, PtyHandler } from './pty-handler'
@@ -191,6 +192,9 @@ export class RelayAgentHookRuntime {
   }
 
   private registerHandlers(): void {
+    this.dispatcher.onRequest(TERMINAL_ANSWER_READ_METHOD, async (params) =>
+      this.hookServer.terminalAnswers.read(params)
+    )
     this.dispatcher.onRequest(AGENT_HOOK_INFER_INTERRUPT_METHOD, async (params) => ({
       applied: this.hookServer.inferInterrupt(params)
     }))

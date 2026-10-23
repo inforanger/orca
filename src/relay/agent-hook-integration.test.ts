@@ -29,6 +29,10 @@ import {
 import { AGENT_STATUS_ASSISTANT_MESSAGE_MAX_LENGTH } from '../shared/agent-status-types'
 import { AgentHookServer } from '../main/agent-hooks/server'
 import { publishAgentHookEnvelope } from './agent-hook-envelope-publication'
+import {
+  RelayTerminalAnswerDelivery,
+  TERMINAL_ANSWER_READ_METHOD
+} from '../shared/terminal-answer-transfer'
 
 const LEAF_7 = '77777777-7777-4777-8777-777777777777'
 const LEAF_9 = '99999999-9999-4999-8999-999999999999'
@@ -86,10 +90,17 @@ describe('Integration: relay hook server → mux → AgentHookServer.ingestRemot
       const replayed = hookServer.replayCachedPayloadsForPanes()
       return { replayed }
     })
+    dispatcher.onRequest(TERMINAL_ANSWER_READ_METHOD, async (params) =>
+      hookServer.terminalAnswers.read(params)
+    )
 
     mux = new SshChannelMultiplexer(clientTransport)
 
     orcaServer = new AgentHookServer()
+    const answers = new RelayTerminalAnswerDelivery(
+      (method, params) => mux.request(method, params),
+      () => !mux.isDisposed()
+    )
     // Why: Orca-side never starts an HTTP server in this test — `ingestRemote`
     // is the entry point we exercise. setListener registers the IPC fanout
     // sink we assert against. Server is otherwise inert.
@@ -97,14 +108,17 @@ describe('Integration: relay hook server → mux → AgentHookServer.ingestRemot
       if (method === AGENT_HOOK_NOTIFICATION_METHOD) {
         // Why: `connectionId` is normally derived from the mux identity at
         // the call site. For the in-memory test we use a fixed string.
-        orcaServer.ingestRemote(
-          params as unknown as {
-            paneKey: string
-            tabId?: string
-            worktreeId?: string
-            payload: unknown
-          },
-          'conn-test'
+        answers.deliver(params, (hydrated) =>
+          orcaServer.ingestRemote(
+            // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: ingestRemote validates this wire envelope before accepting it.
+            hydrated as {
+              paneKey: string
+              tabId?: string
+              worktreeId?: string
+              payload: unknown
+            },
+            'conn-test'
+          )
         )
       }
     })
@@ -154,6 +168,30 @@ describe('Integration: relay hook server → mux → AgentHookServer.ingestRemot
     await expect
       .poll(() => orcaServer.getStatusSnapshotForPane(paneKey)[0]?.mainAgent?.outcome)
       .toBe('cancellation')
+  })
+
+  it('recovers a long final answer shed from a bounded real hook frame', async () => {
+    const { port, token } = hookServer.getCoordinates()
+    const text = '가나다🙂\n'.repeat(3000)
+    const received = new Promise<string | undefined>((resolve) => {
+      orcaServer.setListener((event) => {
+        if (event.hookEventName === 'Stop') {
+          resolve(event.fullAssistantMessage)
+        }
+      })
+    })
+    const response = await fetch(`http://127.0.0.1:${port}/hook/codex`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Orca-Agent-Hook-Token': token },
+      body: JSON.stringify({
+        paneKey: `tab-7:${LEAF_7}`,
+        tabId: 'tab-7',
+        worktreeId: 'folder-workspace',
+        payload: { hook_event_name: 'Stop', last_assistant_message: text }
+      })
+    })
+    expect(response.status).toBe(204)
+    expect(await received).toBe(text)
   })
 
   it.each([

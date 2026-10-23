@@ -36,6 +36,7 @@ export type EnrichedAgentHookEventPayload = AgentHookEventPayload & {
 export type PersistedAgentHookEventPayload = Omit<
   EnrichedAgentHookEventPayload,
   | 'authorityRestartId'
+  | 'fullAssistantMessage'
   | 'launchToken'
   | 'hostTurnRevision'
   | 'promptInteractionKey'

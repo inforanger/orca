@@ -50,8 +50,10 @@ import {
   type CachedPaneEnvelopeMeta
 } from './agent-hook-cached-pane-status'
 import { createRelayClaudeTerminalInterrupts } from './claude-terminal-interrupt-status'
+import { TerminalAnswerCache } from '../shared/terminal-answer-transfer'
 
 export class RelayAgentHookServer extends RelayAgentHookCanonicalStatus {
+  readonly terminalAnswers = new TerminalAnswerCache()
   private server: ReturnType<typeof createServer> | null = null
   private port = 0
   private token = ''
@@ -85,11 +87,11 @@ export class RelayAgentHookServer extends RelayAgentHookCanonicalStatus {
     this.endpointFilePath = join(this.endpointDir, getEndpointFileName())
     this.fixedToken = options.token
     this.preferredPort = options.preferredPort ?? 0
-    this.forward = options.forward
+    this.forward = (envelope) => options.forward(this.terminalAnswers.attach(envelope))
     this.isPaneSurfaceRetired = options.isPaneSurfaceRetired ?? (() => false)
     this.getAgentLaunchToken = options.getAgentLaunchToken ?? (() => undefined)
     this.configureCanonicalHooks(
-      options,
+      { ...options, forward: this.forward },
       (paneKey) => this.clearPaneState(paneKey, true),
       (paneKey) => {
         const row = this.state.lastStatusByPaneKey.get(paneKey)

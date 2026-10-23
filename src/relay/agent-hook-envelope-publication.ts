@@ -6,6 +6,7 @@ import {
   type AgentHookRelayEnvelope
 } from '../shared/agent-hook-relay'
 import type { RelayDispatcher } from './dispatcher'
+import { fitTerminalAnswerFrame } from './agent-hook-answer-frame'
 
 // Why: shed the biggest, most reconstructible fields first — state/paneKey must survive or the pane
 // stays stuck on its last spinner, and an over-capacity frame is now dropped rather than sent.
@@ -182,8 +183,7 @@ export function publishAgentHookEnvelope(
   // frame a smaller later client forces us to shed. A single sink writes nothing when it rejects,
   // so there the attempt itself is the measurement — one encode instead of a probe plus a publish.
   const measureBeforePublish = clientIds.length > 1
-  let candidate = envelope
-  const shedFields: string[] = []
+  let { candidate, shedFields } = fitTerminalAnswerFrame(dispatcher, envelope)
   let step = 0
   for (;;) {
     const params = toNotificationParams(candidate, shedFields)

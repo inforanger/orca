@@ -45,6 +45,7 @@ export abstract class AgentHookServerPersistence extends AgentHookServerHydratio
         terminalHandle: _terminalHandle,
         hostTurnRevision: _hostTurnRevision,
         launchToken,
+        fullAssistantMessage: _fullAssistantMessage,
         ...persistedPayload
       } = enrichedPayload
       const launchTokenHash = launchToken?.trim()

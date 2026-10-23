@@ -5,6 +5,8 @@ export {
   TerminalCreateParams,
   TerminalFocus,
   TerminalHandle,
+  TerminalPromptResult,
+  TerminalWaitPrompt,
   TerminalInspectProcess,
   TerminalListParams,
   TerminalRead,

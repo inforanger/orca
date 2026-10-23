@@ -7,6 +7,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import type { SshChannelMultiplexer } from '../ssh/ssh-channel-multiplexer'
 import { AGENT_HOOK_NOTIFICATION_METHOD } from '../../shared/agent-hook-relay'
 import { wslHookRelayConnectionId } from '../../shared/wsl-hook-relay-contract'
+import { RelayTerminalAnswerDelivery } from '../../shared/terminal-answer-transfer'
 
 export type WslRelayLinkOptions = {
   mux: SshChannelMultiplexer
@@ -30,6 +31,10 @@ export function wireWslRelayLink(options: WslRelayLinkOptions): void {
   const { mux, child, distro, ingest, warn, onDead } = options
   const connectionId = wslHookRelayConnectionId(distro)
   let dead = false
+  const answers = new RelayTerminalAnswerDelivery(
+    (method, params) => mux.request(method, params, { timeoutMs: 5_000 }),
+    () => !dead
+  )
   const unbindInterrupt = options.bindInterruptReconciliation?.(mux, connectionId, () => !dead)
 
   mux.onNotification((method, params) => {
@@ -47,7 +52,7 @@ export function wireWslRelayLink(options: WslRelayLinkOptions): void {
     }
     // Trust boundary: ingestRemote re-validates paneKey/tabId and
     // re-normalizes the payload, same as the SSH relay path.
-    ingest(params, connectionId)
+    answers.deliver(params, (hydrated) => ingest(hydrated, connectionId))
   })
 
   const die = (reason: string): void => {

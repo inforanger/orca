@@ -1,6 +1,8 @@
 import { defineMethod } from '../../core'
 import {
   TerminalHandle,
+  TerminalPromptResult,
+  TerminalWaitPrompt,
   TerminalInspectProcess,
   TerminalListParams,
   TerminalRead,
@@ -11,6 +13,32 @@ import {
 } from './unary-schemas'
 
 export const TERMINAL_QUERY_METHODS = [
+  defineMethod({
+    name: 'terminal.promptResult',
+    permission: 'workspace',
+    params: TerminalPromptResult,
+    handler: async (params, { runtime }) => ({
+      prompt: runtime.getTerminalPromptResult(
+        params.terminal,
+        params.requestId,
+        params.offset,
+        params.limit
+      )
+    })
+  }),
+  defineMethod({
+    name: 'terminal.waitPrompt',
+    permission: 'workspace',
+    params: TerminalWaitPrompt,
+    handler: async (params, { runtime, signal }) => ({
+      prompt: await runtime.waitForTerminalPrompt(
+        params.terminal,
+        params.requestId,
+        params.timeoutMs,
+        signal
+      )
+    })
+  }),
   defineMethod({
     name: 'terminal.list',
     permission: 'workspace',

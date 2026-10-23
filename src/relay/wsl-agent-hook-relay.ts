@@ -11,6 +11,7 @@
 // stale Windows-side hook posts — so unlike the SSH relay there is no grace
 // period and no daemon socket.
 import { AGENT_HOOK_INFER_INTERRUPT_METHOD } from '../shared/agent-hook-interrupt-reconciliation'
+import { TERMINAL_ANSWER_READ_METHOD } from '../shared/terminal-answer-transfer'
 import { homedir } from 'node:os'
 
 import { RELAY_SENTINEL } from './protocol'
@@ -74,6 +75,9 @@ async function main(): Promise<void> {
   dispatcher.onRequest(AGENT_HOOK_INFER_INTERRUPT_METHOD, async (params) => ({
     applied: hookServer.inferInterrupt(params)
   }))
+  dispatcher.onRequest(TERMINAL_ANSWER_READ_METHOD, async (params) =>
+    hookServer.terminalAnswers.read(params)
+  )
   new PreflightHandler(dispatcher)
 
   dispatcher.onRequest(AGENT_HOOK_REQUEST_REPLAY_METHOD, async () => ({

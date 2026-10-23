@@ -8,9 +8,49 @@ import type {
 } from './agent-prompt-submission-verification'
 import { verifyAgentPromptSubmission } from './agent-prompt-submission-verification'
 import { AgentPromptRequestCorrelation } from './agent-prompt-request-correlation'
+import { TerminalPromptCompletions } from './terminal-prompt-completions'
+import type { EnrichedAgentHookEventPayload } from '../agent-hooks/server/server-types'
+import type { TerminalPromptResult } from '../../shared/terminal-prompt-result'
 
 export class OrcaRuntimeWithAgentPromptRequestCorrelation extends OrcaRuntimeWithSerializeAgentPromptSubmission {
   private readonly agentPromptCorrelation = new AgentPromptRequestCorrelation()
+  private readonly promptCompletions = new TerminalPromptCompletions(this.agentPromptCorrelation)
+  declare getTerminalHandleForPaneKey: (paneKey: string) => string | null
+
+  observeTerminalPromptStatus(event: EnrichedAgentHookEventPayload): void {
+    const handle = this.getTerminalHandleForPaneKey(event.paneKey)
+    if (!handle) {
+      return
+    }
+    try {
+      this.promptCompletions.observe(handle, this.getTerminalPromptRequestBinding(handle), event)
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !['terminal_handle_stale', 'terminal_not_writable'].includes(error.message)
+      ) {
+        throw error
+      }
+    }
+  }
+
+  getTerminalPromptResult(
+    handle: string,
+    requestId: string,
+    offset?: number,
+    limit?: number
+  ): TerminalPromptResult {
+    return this.promptCompletions.read(handle, requestId, offset, limit)
+  }
+
+  waitForTerminalPrompt(
+    handle: string,
+    requestId: string,
+    timeoutMs = 300_000,
+    signal?: AbortSignal
+  ): Promise<TerminalPromptResult> {
+    return this.promptCompletions.wait(handle, requestId, timeoutMs, signal)
+  }
   // Declared, not defined: both live further up the mixin chain, so this link cannot see them.
   declare protected getLivePtyForHandle: (
     handle: string
@@ -82,7 +122,6 @@ export class OrcaRuntimeWithAgentPromptRequestCorrelation extends OrcaRuntimeWit
         signal,
         timeoutMs
       })
-      this.forgetAgentPromptRequest(binding.ptyId, binding.generation, prompt.requestId)
       return { ...prompt, stages: ['input_accepted', 'turn_started'], observation: 'supported' }
     } catch (error) {
       if (error instanceof Error && error.message === 'agent_prompt_stalled') {
@@ -97,13 +136,18 @@ export class OrcaRuntimeWithAgentPromptRequestCorrelation extends OrcaRuntimeWit
   }
 
   protected registerAgentPromptRequest(
+    handle: string,
     ptyId: string,
     generation: number,
     requestId: string,
     baselineWorkingSequence: number,
     baselineExplicitWorkingStartedAt: number | null
   ): void {
-    this.agentPromptCorrelation.register(ptyId, {
+    this.promptCompletions.register({
+      terminal: handle,
+      registeredAt: Date.now(),
+      ...this.getTerminalPromptRequestBinding(handle),
+      ptyId,
       generation,
       requestId,
       baselineWorkingSequence,
@@ -112,6 +156,7 @@ export class OrcaRuntimeWithAgentPromptRequestCorrelation extends OrcaRuntimeWit
   }
 
   protected forgetAgentPromptRequest(ptyId: string, generation: number, requestId: string): void {
+    this.promptCompletions.cancel(ptyId, generation, requestId)
     this.agentPromptCorrelation.forget(ptyId, generation, requestId)
   }
 
@@ -134,6 +179,7 @@ export class OrcaRuntimeWithAgentPromptRequestCorrelation extends OrcaRuntimeWit
   }
 
   protected clearAgentPromptCorrelationForPty(ptyId: string): void {
+    this.promptCompletions.clearForPty(ptyId)
     this.agentPromptCorrelation.clearForPty(ptyId)
   }
 }

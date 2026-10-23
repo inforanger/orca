@@ -27,6 +27,7 @@ import {
 } from './agent-hook-listener/opencode-session-registry'
 import { claudeRowHasUnlistedLiveWork } from './agent-hook-listener/providers/claude-pane-hold-evidence'
 import { readString } from './agent-hook-listener/tool-input-preview'
+import { readTerminalFinalAnswer } from './agent-hook-listener/terminal-final-answer'
 /** Canonical transport-agnostic normalization entry shared by main and relay listeners. */
 const CLAUDE_EXIT_SESSION_END_REASONS = new Set([
   'prompt_input_exit',
@@ -297,6 +298,11 @@ export function normalizeHookPayload(
       : {}),
     ...(providerSession ? { providerSession } : {}),
     ...(providerSessionOnly ? { providerSessionOnly: true } : {}),
+    ...((source === 'codex' || source === 'claude') &&
+    eventName === 'Stop' &&
+    !readFirstString(hookPayloadRecord, ['agent_id', 'agentId'])
+      ? { fullAssistantMessage: readTerminalFinalAnswer(source, hookPayloadRecord) }
+      : {}),
     payload: transportPayload
   }
 }

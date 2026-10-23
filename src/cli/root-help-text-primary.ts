@@ -89,6 +89,8 @@ export const ROOT_HELP_TEXT_PRIMARY = [
   '  terminal read             Read bounded terminal output',
   '  terminal send             Send input to a live terminal',
   '  terminal wait             Wait for a terminal condition (exit, tui-idle)',
+  '  terminal prompt-result    Read a request completion and answer page',
+  '  terminal wait-prompt      Wait for a terminal.send request to complete',
   '  terminal create           Create a terminal session in a worktree',
   '  terminal rename           Set or clear the title of a terminal tab',
   '  terminal split            Split an existing terminal pane',

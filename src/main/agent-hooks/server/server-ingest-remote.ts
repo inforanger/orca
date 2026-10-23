@@ -276,6 +276,14 @@ export abstract class AgentHookServerIngestRemote extends AgentHookServerIngestS
       toolAgentType,
       providerSession,
       providerSessionOnly: envelope.providerSessionOnly === true ? true : undefined,
+      fullAssistantMessage:
+        typeof envelope.fullAssistantMessage === 'string' &&
+        envelope.fullAssistantMessage.length <= 4 * 1024 * 1024 &&
+        hookEventName === 'Stop' &&
+        !toolAgentId &&
+        (source === 'claude' || source === 'codex')
+          ? envelope.fullAssistantMessage
+          : undefined,
       isReplay: envelope.isReplay === true ? true : undefined,
       claudeRunningNonAgentTask:
         typeof envelope.claudeRunningNonAgentTask === 'boolean'

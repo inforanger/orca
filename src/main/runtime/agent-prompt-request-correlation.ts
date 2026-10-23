@@ -77,6 +77,12 @@ export class AgentPromptRequestCorrelation {
     ) {
       return false
     }
+    const existingClaim = this.findClaim(ptyId, generation, requestId, evidence.kind)
+    if (existingClaim?.kind === evidence.kind) {
+      return evidence.kind === 'hook'
+        ? existingClaim.value === evidence.workingStartedAt
+        : existingClaim.value <= evidence.workingSequence
+    }
     const requests = this.requestsByPty.get(ptyId) ?? []
     const request = requests.find(
       (candidate) => candidate.generation === generation && candidate.requestId === requestId
@@ -97,7 +103,9 @@ export class AgentPromptRequestCorrelation {
     } else {
       const first = requests.find(
         (candidate) =>
-          candidate.generation === generation && isTurnStartAfterBaseline(evidence, candidate)
+          candidate.generation === generation &&
+          !this.findClaim(ptyId, generation, candidate.requestId, 'hook') &&
+          isTurnStartAfterBaseline(evidence, candidate)
       )
       if (first && first.requestId !== requestId) {
         return false
@@ -112,7 +120,18 @@ export class AgentPromptRequestCorrelation {
       return false
     }
     this.recordClaim(ptyId, claim)
-    this.forget(ptyId, generation, requestId)
+    if (evidence.kind === 'hook' && !this.findClaim(ptyId, generation, requestId, 'lifecycle')) {
+      const reserved = this.nextFreeClaim(
+        ptyId,
+        generation,
+        baselineWorkingSequence,
+        { kind: 'lifecycle', workingSequence: Number.MAX_SAFE_INTEGER },
+        requestId
+      )
+      if (reserved) {
+        this.recordClaim(ptyId, reserved)
+      }
+    }
     return true
   }
 
@@ -125,7 +144,7 @@ export class AgentPromptRequestCorrelation {
       if (
         candidate.generation !== generation ||
         !isTurnStartAfterBaseline(evidence, candidate) ||
-        this.findClaim(ptyId, generation, candidate.requestId)
+        this.findClaim(ptyId, generation, candidate.requestId, 'lifecycle')
       ) {
         continue
       }
@@ -144,11 +163,21 @@ export class AgentPromptRequestCorrelation {
     }
   }
 
-  private findClaim(ptyId: string, generation: number, requestId: string): TurnStartClaim | null {
+  private findClaim(
+    ptyId: string,
+    generation: number,
+    requestId: string,
+    kind?: TurnStartClaim['kind']
+  ): TurnStartClaim | null {
     return (
       this.claimsByPty
         .get(ptyId)
-        ?.find((claim) => claim.generation === generation && claim.requestId === requestId) ?? null
+        ?.find(
+          (claim) =>
+            claim.generation === generation &&
+            claim.requestId === requestId &&
+            (!kind || claim.kind === kind)
+        ) ?? null
     )
   }
 
@@ -175,8 +204,8 @@ export class AgentPromptRequestCorrelation {
     )
     if (existing === -1) {
       claims.push(claim)
-      if (claims.length > REQUESTS_PER_PTY_LIMIT) {
-        claims.splice(0, claims.length - REQUESTS_PER_PTY_LIMIT)
+      if (claims.length > REQUESTS_PER_PTY_LIMIT * 2) {
+        claims.splice(0, claims.length - REQUESTS_PER_PTY_LIMIT * 2)
       }
     } else {
       claims[existing] = claim

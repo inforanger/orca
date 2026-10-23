@@ -57,6 +57,7 @@ export type AgentHookEventPayload = {
   /** Execution-host clock retained for age-preserving projection replay; never sent verbatim. */
   hostEvidenceObservedAt?: number
   payload: ParsedAgentStatusPayload
+  fullAssistantMessage?: string
 }
 
 export type StructuredHostStatus = 'held' | 'owned'

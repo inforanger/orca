@@ -44,6 +44,36 @@ async function postClaudeHook(
 }
 
 describe('AgentHookServer listener replay', () => {
+  it('supplies the complete Stop answer to enriched subscribers while keeping the preview bounded', async () => {
+    const server = new AgentHookServer()
+    await server.start({ env: 'production' })
+    const received = vi.fn()
+    const unsubscribe = server.subscribeEnrichedStatus(received)
+    try {
+      const text = '가나다🙂\n'.repeat(3000)
+      expect(
+        (await postClaudeHook(server, { hook_event_name: 'UserPromptSubmit', prompt: 'question' }))
+          .status
+      ).toBe(204)
+      expect(
+        (await postClaudeHook(server, { hook_event_name: 'Stop', last_assistant_message: text }))
+          .status
+      ).toBe(204)
+      expect(received).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          hookEventName: 'Stop',
+          turnStartedAt: expect.any(Number),
+          fullAssistantMessage: text
+        })
+      )
+      expect(
+        server.getStatusSnapshotForPane(PANE)[0]?.lastAssistantMessage?.length
+      ).toBeLessThanOrEqual(8000)
+    } finally {
+      unsubscribe()
+      server.stop()
+    }
+  })
   it('accepts raw JSON hook bodies with base64 metadata headers', async () => {
     const server = new AgentHookServer()
     await server.start({ env: 'production' })

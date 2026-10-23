@@ -535,6 +535,7 @@ import {
   TerminalHandle,
   TerminalInspectProcess,
   TerminalListParams,
+  TerminalPromptResult,
   TerminalRead,
   TerminalRecoverPane,
   TerminalRename,
@@ -544,7 +545,8 @@ import {
   TerminalSetViewerColors,
   TerminalSplit,
   TerminalStopExact,
-  TerminalWait
+  TerminalWait,
+  TerminalWaitPrompt
 } from './terminal-unary-params'
 import { TerminalGetAutoRestoreFitParams } from './terminal-viewport-methods-params'
 import {
@@ -1211,6 +1213,7 @@ export const RPC_PARAMS_BY_METHOD = {
   'terminal.isRunningAgent': TerminalHandle,
   'terminal.list': TerminalListParams,
   'terminal.multiplex': TerminalMultiplex,
+  'terminal.promptResult': TerminalPromptResult,
   'terminal.read': TerminalRead,
   'terminal.recoverPane': TerminalRecoverPane,
   'terminal.rename': TerminalRename,
@@ -1233,6 +1236,7 @@ export const RPC_PARAMS_BY_METHOD = {
   'terminal.unsubscribe': TerminalUnsubscribe,
   'terminal.updateViewport': TerminalUpdateViewport,
   'terminal.wait': TerminalWait,
+  'terminal.waitPrompt': TerminalWaitPrompt,
   'ui.get': null,
   'ui.recordFeatureInteraction': FeatureInteractionIdParam,
   'ui.set': UiUpdate,

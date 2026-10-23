@@ -6,6 +6,7 @@ import {
 import { isAgentHookSource, type AgentHookSource } from '../../../shared/agent-hook-relay'
 
 export type RemoteAgentStatusEnvelope = {
+  fullAssistantMessage?: unknown
   paneKey: string
   tabId?: string
   worktreeId?: string

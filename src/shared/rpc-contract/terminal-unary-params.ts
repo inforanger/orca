@@ -18,6 +18,17 @@ export const TerminalFocus = TerminalHandle.extend({
   navigation: z.enum(['caller', 'host']).optional()
 })
 
+export const TerminalPromptResult = TerminalHandle.extend({
+  requestId: requiredString('Missing prompt request ID'),
+  offset: z.number().int().nonnegative().optional(),
+  limit: z.number().int().min(1).max(16_384).optional()
+})
+
+export const TerminalWaitPrompt = TerminalHandle.extend({
+  requestId: requiredString('Missing prompt request ID'),
+  timeoutMs: z.number().int().min(0).max(3_600_000).optional()
+})
+
 /**
  * `terminal.inspectProcess` carries one member the sibling handle methods must not: whether the
  * caller's answer decides something once, which is what licenses the host to pay for a process-table

@@ -2,6 +2,7 @@
 // Why: single authority for all relay lifecycle state per SSH target (previously scattered across module Maps/Sets with duplicated paths).
 
 import { randomUUID } from 'node:crypto'
+import { RelayTerminalAnswerDelivery } from '../../shared/terminal-answer-transfer'
 import type { BrowserWindow } from 'electron'
 import { deployAndLaunchRelay } from './ssh-relay-deploy'
 import { RemoteRuntimeUnavailableError } from './ssh-relay-runtime-resolution'
@@ -1765,6 +1766,10 @@ export class SshRelaySession {
       this.targetId,
       () => this.mux === mux
     )
+    const answers = new RelayTerminalAnswerDelivery(
+      (method, params) => mux.request(method, params, { timeoutMs: 5_000 }),
+      () => this.mux === mux && !mux.isDisposed()
+    )
     this.muxNotificationCleanup = mux.onNotification((method, params) => {
       if (method !== AGENT_HOOK_NOTIFICATION_METHOD) {
         return
@@ -1778,48 +1783,57 @@ export class SshRelaySession {
         return
       }
       // Why: forward the agent CLI's env/version verbatim (not the relay's) so warn-once protocol-mismatch diagnostics fire for remote events too.
-      agentHookServer.ingestRemote(
-        {
-          paneKey: envelope.paneKey,
-          hostTurnRevision: envelope.hostTurnRevision,
-          launchToken: typeof envelope.launchToken === 'string' ? envelope.launchToken : undefined,
-          tabId: typeof envelope.tabId === 'string' ? envelope.tabId : undefined,
-          worktreeId: typeof envelope.worktreeId === 'string' ? envelope.worktreeId : undefined,
-          env: typeof envelope.env === 'string' ? envelope.env : undefined,
-          version: typeof envelope.version === 'string' ? envelope.version : undefined,
-          hasExplicitPrompt: envelope.hasExplicitPrompt === true ? true : undefined,
-          promptInteractionKey:
-            typeof envelope.promptInteractionKey === 'string'
-              ? envelope.promptInteractionKey
-              : undefined,
-          hookEventName:
-            typeof envelope.hookEventName === 'string' ? envelope.hookEventName : undefined,
-          source: envelope.source,
-          providerPromptId: envelope.providerPromptId,
-          grokPromptBoundary: envelope.grokPromptBoundary === true ? true : undefined,
-          compactTrigger: envelope.compactTrigger,
-          toolUseId: typeof envelope.toolUseId === 'string' ? envelope.toolUseId : undefined,
-          toolAgentId: typeof envelope.toolAgentId === 'string' ? envelope.toolAgentId : undefined,
-          teammateName:
-            typeof envelope.teammateName === 'string' ? envelope.teammateName : undefined,
-          toolAgentType:
-            typeof envelope.toolAgentType === 'string' ? envelope.toolAgentType : undefined,
-          isReplay: envelope.isReplay === true ? true : undefined,
-          providerSession: envelope.providerSession,
-          providerSessionOnly: envelope.providerSessionOnly === true ? true : undefined,
-          // Why: names the fields the relay dropped to fit the frame; ingestRemote restores them.
-          shedFields: envelope.shedFields,
-          claudeRunningNonAgentTask:
-            typeof envelope.claudeRunningNonAgentTask === 'boolean'
-              ? envelope.claudeRunningNonAgentTask
-              : undefined,
-          // Why: the SSH relay protocol advertises no run-serving capability.
-          advertisedAgentStatusCapabilities: AGENT_STATUS_LEGACY_UNADVERTISED_PEER_CAPABILITIES,
-          evidenceAgeMs: envelope.evidenceAgeMs,
-          statusUnavailable: envelope.statusUnavailable,
-          payload: envelope.payload
-        },
-        this.targetId
+      const paneKey = envelope.paneKey
+      answers.deliver(envelope, (hydrated) =>
+        agentHookServer.ingestRemote(
+          {
+            fullAssistantMessage:
+              typeof hydrated.fullAssistantMessage === 'string'
+                ? hydrated.fullAssistantMessage
+                : undefined,
+            paneKey,
+            hostTurnRevision: envelope.hostTurnRevision,
+            launchToken:
+              typeof envelope.launchToken === 'string' ? envelope.launchToken : undefined,
+            tabId: typeof envelope.tabId === 'string' ? envelope.tabId : undefined,
+            worktreeId: typeof envelope.worktreeId === 'string' ? envelope.worktreeId : undefined,
+            env: typeof envelope.env === 'string' ? envelope.env : undefined,
+            version: typeof envelope.version === 'string' ? envelope.version : undefined,
+            hasExplicitPrompt: envelope.hasExplicitPrompt === true ? true : undefined,
+            promptInteractionKey:
+              typeof envelope.promptInteractionKey === 'string'
+                ? envelope.promptInteractionKey
+                : undefined,
+            hookEventName:
+              typeof envelope.hookEventName === 'string' ? envelope.hookEventName : undefined,
+            source: envelope.source,
+            providerPromptId: envelope.providerPromptId,
+            grokPromptBoundary: envelope.grokPromptBoundary === true ? true : undefined,
+            compactTrigger: envelope.compactTrigger,
+            toolUseId: typeof envelope.toolUseId === 'string' ? envelope.toolUseId : undefined,
+            toolAgentId:
+              typeof envelope.toolAgentId === 'string' ? envelope.toolAgentId : undefined,
+            teammateName:
+              typeof envelope.teammateName === 'string' ? envelope.teammateName : undefined,
+            toolAgentType:
+              typeof envelope.toolAgentType === 'string' ? envelope.toolAgentType : undefined,
+            isReplay: envelope.isReplay === true ? true : undefined,
+            providerSession: envelope.providerSession,
+            providerSessionOnly: envelope.providerSessionOnly === true ? true : undefined,
+            // Why: names the fields the relay dropped to fit the frame; ingestRemote restores them.
+            shedFields: envelope.shedFields,
+            claudeRunningNonAgentTask:
+              typeof envelope.claudeRunningNonAgentTask === 'boolean'
+                ? envelope.claudeRunningNonAgentTask
+                : undefined,
+            // Why: the SSH relay protocol advertises no run-serving capability.
+            advertisedAgentStatusCapabilities: AGENT_STATUS_LEGACY_UNADVERTISED_PEER_CAPABILITIES,
+            evidenceAgeMs: envelope.evidenceAgeMs,
+            statusUnavailable: envelope.statusUnavailable,
+            payload: envelope.payload
+          },
+          this.targetId
+        )
       )
     })
 

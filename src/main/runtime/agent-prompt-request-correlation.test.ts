@@ -22,6 +22,24 @@ function register(
 }
 
 describe('agent prompt request correlation', () => {
+  it('does not give a hook-started turn to another request through lifecycle evidence', () => {
+    const correlation = new AgentPromptRequestCorrelation()
+    register(correlation, 'first', 0)
+    register(correlation, 'second', 0)
+    const hook = { kind: 'hook' as const, workingStartedAt: 500 }
+    expect(correlation.acceptTurnStart(PTY, GENERATION, 'first', 0, null, hook)).toBe(true)
+    correlation.forget(PTY, GENERATION, 'first')
+    expect(correlation.acceptTurnStart(PTY, GENERATION, 'second', 0, null, lifecycle(1))).toBe(
+      false
+    )
+    expect(correlation.acceptTurnStart(PTY, GENERATION, 'first', 0, null, hook)).toBe(true)
+    expect(
+      correlation.acceptTurnStart(PTY, GENERATION, 'second', 0, null, {
+        kind: 'hook',
+        workingStartedAt: 600
+      })
+    ).toBe(true)
+  })
   it('gives one lifecycle transition to exactly one queued request', () => {
     const correlation = new AgentPromptRequestCorrelation()
     register(correlation, 'first', 0)

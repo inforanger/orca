@@ -9,6 +9,8 @@ import {
 } from './terminal/stream-schemas'
 
 const METHOD_CASES: readonly (readonly [string, unknown, boolean])[] = [
+  ['terminal.promptResult', { terminal: 'term', requestId: 'request' }, false],
+  ['terminal.waitPrompt', { terminal: 'term', requestId: 'request' }, false],
   ['terminal.list', {}, false],
   ['terminal.resolveActive', {}, false],
   ['terminal.resolvePane', { paneKey: 'pane' }, false],
@@ -68,12 +70,46 @@ async function invoke(name: string, params: unknown, runtime: Partial<OrcaRuntim
 }
 
 describe('terminal RPC manifest characterization', () => {
+  it('validates prompt-result paging and passes request identity to the runtime', async () => {
+    const getTerminalPromptResult = vi.fn(() => ({ state: 'pending' as const }))
+    const waitForTerminalPrompt = vi.fn(async () => ({ state: 'unavailable' as const }))
+    await expect(
+      invoke(
+        'terminal.promptResult',
+        { terminal: 'term', requestId: 'request', offset: 16384 },
+        { getTerminalPromptResult }
+      )
+    ).resolves.toEqual({ prompt: { state: 'pending' } })
+    expect(getTerminalPromptResult).toHaveBeenCalledWith('term', 'request', 16384, undefined)
+    await expect(
+      invoke(
+        'terminal.waitPrompt',
+        { terminal: 'term', requestId: 'request', timeoutMs: 0 },
+        { waitForTerminalPrompt }
+      )
+    ).resolves.toEqual({ prompt: { state: 'unavailable' } })
+    expect(waitForTerminalPrompt).toHaveBeenCalledWith('term', 'request', 0, undefined)
+    expect(() =>
+      schemaFor('terminal.promptResult').parse({
+        terminal: 'term',
+        requestId: 'request',
+        limit: 16385
+      })
+    ).toThrow()
+    expect(() =>
+      schemaFor('terminal.promptResult').parse({
+        terminal: 'term',
+        requestId: 'request',
+        offset: -1
+      })
+    ).toThrow()
+  })
   it('preserves all method names, order, streaming flags, and parseable minimum inputs', () => {
-    expect(TERMINAL_METHODS).toHaveLength(37)
+    expect(TERMINAL_METHODS).toHaveLength(39)
     expect(TERMINAL_METHODS.map((method) => [method.name, 'stream' in method])).toEqual(
       METHOD_CASES.map(([name, _params, stream]) => [name, stream])
     )
-    expect(new Set(TERMINAL_METHODS.map((method) => method.name)).size).toBe(37)
+    expect(new Set(TERMINAL_METHODS.map((method) => method.name)).size).toBe(39)
     for (const [name, params] of METHOD_CASES) {
       expect(() => schemaFor(name).parse(params), name).not.toThrow()
     }

@@ -70,6 +70,8 @@ export const SSH_BRIDGE_HOST_BINDERS: ReadonlyMap<string, SshBridgeBinder> = new
   ['terminal.read', bindTerminalHandle],
   ['terminal.send', bindTerminalHandle],
   ['terminal.wait', bindTerminalHandle],
+  ['terminal.promptResult', bindTerminalHandle],
+  ['terminal.waitPrompt', bindTerminalHandle],
   ...SSH_BRIDGE_ORCHESTRATION_METHODS.map((method): [string, SshBridgeBinder] => [
     method,
     bindOrchestration

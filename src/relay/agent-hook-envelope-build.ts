@@ -16,6 +16,9 @@ export function buildRelayHookEnvelope(
 ): AgentHookRelayEnvelope {
   return {
     source,
+    ...(event.fullAssistantMessage !== undefined
+      ? { fullAssistantMessage: event.fullAssistantMessage }
+      : {}),
     ...(event.hostEvidenceObservedAt !== undefined
       ? { evidenceAgeMs: Math.max(0, Date.now() - event.hostEvidenceObservedAt) }
       : {}),

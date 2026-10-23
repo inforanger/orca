@@ -186,6 +186,28 @@ export const CORE_COMMAND_SPECS: CommandSpec[] = [
   },
   TERMINAL_SEND_COMMAND_SPEC,
   {
+    path: ['terminal', 'prompt-result'],
+    summary: 'Read a retained request completion and one answer page',
+    usage:
+      'orca terminal prompt-result --terminal <handle> --request-id <id> [--offset <n>] [--limit <n>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'terminal', 'request-id', 'offset', 'limit'],
+    notes: [
+      'Follow answer.nextOffset until null to retrieve the full answer. Offsets and answerLength count UTF-16 code units; answerSha256 hashes the complete UTF-8 text.',
+      'Records are retained in memory for this runtime only, bounded by 1024 requests and 16 Mi characters. Evicted or unknown requests report unavailable.'
+    ]
+  },
+  {
+    path: ['terminal', 'wait-prompt'],
+    summary: 'Wait for the completion of the same terminal.send request',
+    usage:
+      'orca terminal wait-prompt --terminal <handle> --request-id <id> [--timeout-ms <ms>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'terminal', 'request-id', 'timeout-ms'],
+    notes: [
+      'Completion before this wait is retained. Timeout returns pending without resending. Missing full answer evidence reports answerComplete: false and a nonzero CLI exit status.',
+      'Use terminal prompt-result with answer.nextOffset to fetch subsequent pages.'
+    ]
+  },
+  {
     path: ['terminal', 'wait'],
     summary: 'Wait for a terminal condition',
     usage:

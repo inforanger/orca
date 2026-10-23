@@ -79,6 +79,8 @@ export const REMOTE_AGENT_HOOK_ENV = 'remote' as const
 
 /** Wire envelope for a single hook event flowing relay → Orca. */
 export type AgentHookRelayEnvelope = {
+  fullAssistantMessage?: string
+  fullAssistantMessageRef?: { sha256: string; length: number }
   source: AgentHookSource
   paneKey: string
   agentPresence?: AgentProcessPresence

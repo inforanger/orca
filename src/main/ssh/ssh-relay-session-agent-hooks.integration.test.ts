@@ -16,6 +16,10 @@ import { agentHookServer, _internals as agentHookInternals } from '../agent-hook
 import { getSshPtyProvider } from '../ipc/pty'
 import { toAppSshPtyId } from '../providers/ssh-pty-id'
 import { DEFAULT_PTY_SOURCE_WINDOW_SU } from '../../shared/pty-source-credit-contract'
+import {
+  TerminalAnswerCache,
+  TERMINAL_ANSWER_READ_METHOD
+} from '../../shared/terminal-answer-transfer'
 
 const { getCohortAtEmitMock, trackMock } = vi.hoisted(() => ({
   getCohortAtEmitMock: vi.fn(),
@@ -304,6 +308,38 @@ describe('SshRelaySession agent hooks over a fake relay transport', () => {
         toolName: undefined
       }
     })
+  })
+
+  it('retrieves a full answer omitted from a relay notification before ingesting its Stop', async () => {
+    relay = createFakeRelay()
+    vi.mocked(deployAndLaunchRelay).mockResolvedValue({
+      transport: relay.transport,
+      serverBuildId: 'test-relay-build',
+      platform: 'linux-x64'
+    })
+    const cache = new TerminalAnswerCache()
+    const text = '가나다🙂\n'.repeat(3000)
+    const ref = cache.remember(text)
+    relay.dispatcher.onRequest(TERMINAL_ANSWER_READ_METHOD, async (params) => cache.read(params))
+    session = createSession('conn-full-answer')
+    // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: Mocked deployment never reads the connection.
+    await session.establish({} as SshConnection)
+    const received = new Promise<string | undefined>((resolve) => {
+      agentHookServer.setListener((event) => {
+        if (event.hookEventName === 'Stop') {
+          resolve(event.fullAssistantMessage)
+        }
+      })
+    })
+    relay.notifyAgentHook(makeEnvelope({ hookEventName: 'UserPromptSubmit' }))
+    relay.notifyAgentHook(
+      makeEnvelope({
+        hookEventName: 'Stop',
+        fullAssistantMessageRef: ref,
+        payload: { state: 'done', agentType: 'codex', prompt: 'remote prompt' }
+      })
+    )
+    expect(await received).toBe(text)
   })
 
   it('preserves tmux evidence age and unavailable across the real notification adapter', async () => {
