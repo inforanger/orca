@@ -49,6 +49,19 @@ async function startTurn(prompt = 'captured task'): Promise<void> {
 }
 
 describe('Claude native title confirms an Escape interruption', () => {
+  it('settles CLI Ctrl+C only after a live idle title confirms cancellation', async () => {
+    await startTurn()
+    title('◑ Claude Code')
+    server.observeClaudeTerminalEvidence(PANE, { kind: 'input', data: '\x03' })
+    expect(row().mainAgent?.state).toBe('working')
+    title('✳ Claude Code')
+    expect(row()).toMatchObject({
+      state: 'done',
+      interrupted: true,
+      mainAgent: { state: 'done', outcome: 'cancellation' }
+    })
+  })
+
   it('does not settle a stale working row when /usage is dismissed at an idle prompt', async () => {
     await startTurn()
     const tracker = createTerminalTitleTracker({

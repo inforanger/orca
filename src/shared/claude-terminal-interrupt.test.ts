@@ -21,6 +21,24 @@ function createTracker() {
 }
 
 describe('Claude native interruption evidence', () => {
+  it('settles accepted Ctrl+C only after the same working turn reports native idle', () => {
+    const { tracker, interrupt } = createTracker()
+    tracker.observe('pane', { kind: 'title', title: '◑ Claude Code' }, 100)
+    tracker.observe('pane', { kind: 'input', data: '\x03' }, 200)
+    expect(interrupt).not.toHaveBeenCalled()
+    tracker.observe('pane', { kind: 'title', title: '✳ Claude Code' }, 262)
+    expect(interrupt).toHaveBeenCalledOnce()
+  })
+
+  it('does not settle Ctrl+C when Claude keeps working', () => {
+    const { tracker, interrupt } = createTracker()
+    tracker.observe('pane', { kind: 'title', title: '◑ Task' }, 100)
+    tracker.observe('pane', { kind: 'input', data: '\x03' }, 200)
+    tracker.observe('pane', { kind: 'title', title: '◐ Task' }, 250)
+    tracker.observe('pane', { kind: 'title', title: '✳ Task' }, 262)
+    expect(interrupt).not.toHaveBeenCalled()
+  })
+
   it.each(['\x1b', '\x1b[27u', '\x1b[27;1u', '\x1b[27;1:1u'])(
     'accepts a plain Escape press encoded as %j',
     (data) => {

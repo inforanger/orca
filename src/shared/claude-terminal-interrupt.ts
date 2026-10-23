@@ -11,8 +11,8 @@ const TITLE_CONFIRMATION_WINDOW_MS = 5_000
 // oxlint-disable-next-line no-control-regex -- kitty CSI-u reports the Escape key, not terminal text.
 const KITTY_ESCAPE_RE = /^\x1b\[27(?:;1(?::([123]))?)?u$/
 
-function escapeInputEvent(data: string): 'press' | 'repeat' | 'release' | null {
-  if (data === '\x1b') {
+function interruptInputEvent(data: string): 'press' | 'repeat' | 'release' | null {
+  if (data === '\x1b' || data === '\x03') {
     return 'press'
   }
   const match = KITTY_ESCAPE_RE.exec(data)
@@ -28,7 +28,7 @@ type Observation<Row> = {
   pending?: { row: Row; at: number }
 }
 
-/** Correlates accepted Escape with Claude's live OSC title, on the execution host. */
+/** Correlates accepted Escape or Ctrl+C with Claude's live OSC title on the execution host. */
 export class ClaudeTerminalInterruptTracker<Row extends AgentHookEventPayload> {
   private readonly observations = new Map<string, Observation<Row>>()
 
@@ -60,7 +60,7 @@ export class ClaudeTerminalInterruptTracker<Row extends AgentHookEventPayload> {
     const observed = this.observations.get(paneKey) ?? { working: false }
     this.observations.set(paneKey, observed)
     if (evidence.kind === 'input') {
-      const escape = escapeInputEvent(evidence.data)
+      const escape = interruptInputEvent(evidence.data)
       if (escape === 'release' || escape === 'repeat') {
         return
       }
