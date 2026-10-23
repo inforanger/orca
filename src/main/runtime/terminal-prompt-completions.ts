@@ -65,6 +65,7 @@ export class TerminalPromptCompletions {
     const startedAt = event.turnStartedAt
     if (
       event.isReplay ||
+      event.hookEventName === 'SessionStart' ||
       event.toolAgentId ||
       event.structuredHost ||
       event.providerSessionOnly ||

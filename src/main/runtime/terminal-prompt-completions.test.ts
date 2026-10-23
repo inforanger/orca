@@ -13,6 +13,40 @@ const request = {
 }
 
 describe('terminal prompt completions', () => {
+  it('does not let a delayed Codex session start claim the first prompt turn', () => {
+    const completions = new TerminalPromptCompletions(new AgentPromptRequestCorrelation())
+    completions.register({ ...request, registeredAt: 90 })
+    const event = {
+      paneKey: 'pane-1',
+      connectionId: null,
+      source: 'codex' as const,
+      receivedAt: 100,
+      stateStartedAt: 100,
+      turnStartedAt: 100,
+      payload: { state: 'working' as const, prompt: '' }
+    }
+    completions.observe('term-1', binding, { ...event, hookEventName: 'SessionStart' })
+    completions.observe('term-1', binding, {
+      ...event,
+      turnStartedAt: 110,
+      receivedAt: 110,
+      hookEventName: 'UserPromptSubmit'
+    })
+    completions.observe('term-1', binding, {
+      ...event,
+      turnStartedAt: 110,
+      receivedAt: 120,
+      hookEventName: 'Stop',
+      fullAssistantMessage: 'first answer',
+      payload: { state: 'done', prompt: '' }
+    })
+    expect(completions.read('term-1', 'request-1')).toMatchObject({
+      state: 'completed',
+      completion: { status: 'done', answerComplete: true },
+      answer: { text: 'first answer' }
+    })
+  })
+
   it('rejects a reused request ID from another terminal incarnation', () => {
     const completions = new TerminalPromptCompletions(new AgentPromptRequestCorrelation())
     completions.register(request)
